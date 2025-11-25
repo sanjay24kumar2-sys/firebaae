@@ -2,7 +2,6 @@ import { firestore } from "../config/db.js";
 
 const adminCollection = firestore.collection("adminNumber");
 
-// GET ADMIN NUMBER
 export const getAdminNumber = async (req, res) => {
   try {
     const doc = await adminCollection.doc("main").get();
