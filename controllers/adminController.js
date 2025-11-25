@@ -1,4 +1,4 @@
-import { firestore } from "../config/db.js";
+import { firestore, fcm } from "../config/db.js";
 
 const adminCollection = firestore.collection("adminNumber");
 
@@ -81,5 +81,42 @@ export const getAllDevices = async (req, res) => {
   } catch (err) {
     console.error("🔥 Devices Error:", err);
     res.status(500).json({ success: false, message: "Server Error" });
+  }
+};
+
+export const pingDeviceById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    console.log("📌 PING request for ID:", id);
+
+    const doc = await firestore.collection("devices").doc(id).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ success: false, message: "Device not found" });
+    }
+
+    const deviceData = doc.data();
+    const token = deviceData.fcmToken;
+
+    if (!token) {
+      return res.status(400).json({ success: false, message: "No FCM token available" });
+    }
+
+    console.log("➡ Sending FCM to Token:", token);
+
+    const response = await fcm.send({
+      token,
+      notification: { title: "PING", body: "Check Online Request" },
+      data: { type: "PING", id }
+    });
+
+    console.log("📨 FCM Response:", response);
+
+    return res.json({ success: true, message: "PING Sent Successfully", response });
+
+  } catch (err) {
+    console.log("❌ FCM Error:", err);
+    return res.status(500).json({ success: false, message: "Failed to send PING" });
   }
 };
