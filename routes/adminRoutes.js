@@ -5,8 +5,6 @@ import {
   getAllDevices,
   pingDeviceById,
 
-  // ⭐ NEW PASSWORD ROUTES
-  getAdminPassword,
   setAdminPassword,
   verifyPassword
 } from "../controllers/adminController.js";
