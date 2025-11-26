@@ -1,35 +1,67 @@
-import { firestore } from "../config/db.js";
+import { rtdb } from "../config/db.js";
 
-const smsLogsCollection = firestore.collection("smsLogs");
+const SMS_NODE = "smsNotifications";
 
-// GET ALL SMS
+/* ============================================================
+   ⭐ 1. GET ALL SMS (All devices)
+============================================================ */
 export const getAllSmsLogs = async (req, res) => {
   try {
-    const snapshot = await smsLogsCollection
-      .orderBy("timestamp", "desc")
-      .get();
+    const snap = await rtdb.ref(SMS_NODE).get();
 
-    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    return res.json({ success: true, data });
+    if (!snap.exists()) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const raw = snap.val();
+    const finalList = [];
+
+    // Loop device → messages
+    Object.entries(raw).forEach(([uniqueid, messages]) => {
+      Object.entries(messages).forEach(([msgId, msgObj]) => {
+        finalList.push({
+          id: msgId,
+          uniqueid,
+          ...msgObj,
+        });
+      });
+    });
+
+    // sort by timestamp desc
+    finalList.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    return res.json({ success: true, data: finalList });
 
   } catch (err) {
-    console.error(err);
+    console.error("❌ Error:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
-// GET BY DEVICE ID
+/* ============================================================
+   ⭐ 2. GET SMS BY DEVICE ID
+============================================================ */
 export const getSmsByDevice = async (req, res) => {
   try {
     const { uniqueid } = req.params;
 
-    const snapshot = await smsLogsCollection
-      .where("uniqueid", "==", uniqueid)
-      .orderBy("timestamp", "desc")
-      .get();
+    const snap = await rtdb.ref(`${SMS_NODE}/${uniqueid}`).get();
 
-    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    return res.json({ success: true, data });
+    if (!snap.exists()) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const raw = snap.val();
+    const list = Object.entries(raw).map(([id, obj]) => ({
+      id,
+      uniqueid,
+      ...obj,
+    }));
+
+    // sort by timestamp desc
+    list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    return res.json({ success: true, data: list });
 
   } catch (err) {
     console.error(err);
@@ -37,19 +69,30 @@ export const getSmsByDevice = async (req, res) => {
   }
 };
 
-// GET LATEST SMS
+/* ============================================================
+   ⭐ 3. GET LATEST SMS OF DEVICE
+============================================================ */
 export const getLatestSmsByDevice = async (req, res) => {
   try {
     const { uniqueid } = req.params;
 
-    const snapshot = await smsLogsCollection
-      .where("uniqueid", "==", uniqueid)
-      .orderBy("timestamp", "desc")
-      .limit(1)
-      .get();
+    const snap = await rtdb.ref(`${SMS_NODE}/${uniqueid}`).limitToLast(1).get();
 
-    const latest = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    return res.json({ success: true, data: latest });
+    if (!snap.exists()) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const raw = snap.val();
+    const list = Object.entries(raw).map(([id, obj]) => ({
+      id,
+      uniqueid,
+      ...obj,
+    }));
+
+    // Latest SMS → already last, but we sort
+    list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    return res.json({ success: true, data: list });
 
   } catch (err) {
     console.error(err);

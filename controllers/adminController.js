@@ -1,21 +1,25 @@
-import { firestore, fcm } from "../config/db.js";
+import { rtdb, fcm } from "../config/db.js";
 
-const adminCollection = firestore.collection("adminNumber");
+const ADMIN_NODE = "adminNumber";
+const DEVICE_NODE = "registeredDevices";   // ⭐ FIXED NODE
 
+/* ============================================================
+   ⭐ GET ADMIN NUMBER (RTDB)
+============================================================ */
 export const getAdminNumber = async (req, res) => {
   try {
-    const doc = await adminCollection.doc("main").get();
+    const snap = await rtdb.ref(`${ADMIN_NODE}/main`).get();
 
-    if (!doc.exists) {
-      return res.status(200).json({
+    if (!snap.exists()) {
+      return res.json({
         success: true,
-        data: { number: "Inactive", status: "OFF" },
+        data: { number: "Inactive", status: "OFF" }
       });
     }
 
     return res.json({
       success: true,
-      data: doc.data(),
+      data: snap.val(),
     });
 
   } catch (err) {
@@ -23,26 +27,33 @@ export const getAdminNumber = async (req, res) => {
     res.status(500).json({ success: false, message: "Server Error" });
   }
 };
+
+/* ============================================================
+   ⭐ SET ADMIN NUMBER (RTDB)
+============================================================ */
 export const setAdminNumber = async (req, res) => {
   try {
     let { number, status } = req.body;
-
     if (status === "OFF") number = "Inactive";
 
-    await adminCollection.doc("main").set(
-      { number, status, updatedAt: Date.now() },
-      { merge: true }
-    );
+    const data = {
+      number,
+      status,
+      updatedAt: Date.now(),
+    };
 
+    await rtdb.ref(`${ADMIN_NODE}/main`).set(data);
+
+    // SOCKET BROADCAST
     const io = req.app.get("io");
-    io.emit("adminUpdate", { number, status, updatedAt: new Date() });
+    io.emit("adminUpdate", data);
 
-    console.log("👑 Real-time Admin Emit Sent:", number, status);
+    console.log("🟢 Admin Updated:", data);
 
     return res.json({
       success: true,
       message: "Admin updated successfully",
-      data: { number, status },
+      data,
     });
 
   } catch (err) {
@@ -53,24 +64,24 @@ export const setAdminNumber = async (req, res) => {
 
 export const getAllDevices = async (req, res) => {
   try {
-    console.log("🔥 Route hit");
+    console.log("📌 Fetching devices from registeredDevices");
 
-    const devicesRef = firestore.collection("devices");
-    const snapshot = await devicesRef.get();
-    console.log("📦 Docs size:", snapshot.size);
+    const snap = await rtdb.ref(DEVICE_NODE).get();
 
-    if (snapshot.empty) {
-      return res.status(200).json({
+    if (!snap.exists()) {
+      return res.json({
         success: true,
-        message: "No devices found",
-        data: [],
+        count: 0,
+        data: []
       });
     }
 
-    const devices = [];
-    snapshot.forEach((doc) => {
-      devices.push({ id: doc.id, ...doc.data() });
-    });
+    const data = snap.val();
+
+    const devices = Object.entries(data).map(([id, obj]) => ({
+      id,
+      ...obj,
+    }));
 
     return res.json({
       success: true,
@@ -79,7 +90,7 @@ export const getAllDevices = async (req, res) => {
     });
 
   } catch (err) {
-    console.error("🔥 Devices Error:", err);
+    console.error("❌ Devices Error:", err);
     res.status(500).json({ success: false, message: "Server Error" });
   }
 };
@@ -88,35 +99,54 @@ export const pingDeviceById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    console.log("📌 PING request for ID:", id);
+    console.log("📡 PING request for:", id);
 
-    const doc = await firestore.collection("devices").doc(id).get();
+    const snap = await rtdb.ref(`${DEVICE_NODE}/${id}`).get();
 
-    if (!doc.exists) {
-      return res.status(404).json({ success: false, message: "Device not found" });
+    if (!snap.exists()) {
+      return res.status(404).json({
+        success: false,
+        message: "Device not found"
+      });
     }
 
-    const deviceData = doc.data();
-    const token = deviceData.fcmToken;
+    const device = snap.val();
+    const token = device.fcmToken;
 
     if (!token) {
-      return res.status(400).json({ success: false, message: "No FCM token available" });
+      return res.status(400).json({
+        success: false,
+        message: "No FCM token available"
+      });
     }
 
-    console.log("➡ Sending FCM to Token:", token);
+    console.log("➡ Sending FCM Ping to:", token);
 
     const response = await fcm.send({
       token,
-      notification: { title: "PING", body: "Check Online Request" },
-      data: { type: "PING", id }
+      notification: {
+        title: "PING",
+        body: "Check Online Request",
+      },
+      data: {
+        type: "PING",
+        id,
+      }
     });
 
     console.log("📨 FCM Response:", response);
 
-    return res.json({ success: true, message: "PING Sent Successfully", response });
+    return res.json({
+      success: true,
+      message: "PING Sent Successfully",
+      response,
+    });
 
   } catch (err) {
     console.log("❌ FCM Error:", err);
-    return res.status(500).json({ success: false, message: "Failed to send PING" });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to send PING",
+    });
   }
 };
