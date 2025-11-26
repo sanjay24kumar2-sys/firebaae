@@ -16,7 +16,6 @@ const router = express.Router();
 /* ======================================================
    ⭐ PASSWORD ROUTES
 ====================================================== */
-router.get("/api/admin-password", getAdminPassword);
 router.post("/api/admin-password", setAdminPassword);
 router.post("/api/admin-password/verify", verifyPassword);
 

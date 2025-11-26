@@ -4,47 +4,7 @@ const ADMIN_NODE = "adminNumber";
 const DEVICE_NODE = "registeredDevices";
 const PASSWORD_NODE = "adminPassword";  // ⭐ NEW NODE ONLY PASSWORD
 
-/* ============================================================
-   ⭐ GET ADMIN PASSWORD (AUTO CREATE IF NOT EXISTS)
-============================================================ */
-export const getAdminPassword = async (req, res) => {
-  try {
-    const snap = await rtdb.ref(PASSWORD_NODE).get();
 
-    // ⭐ FIRST TIME SET LOGIC
-    if (!snap.exists()) {
-      const defaultPassword = "1234"; // ⭐ First-time default password
-
-      const data = {
-        password: defaultPassword,
-        updatedAt: Date.now(),
-      };
-
-      // Save default password
-      await rtdb.ref(PASSWORD_NODE).set(data);
-
-      console.log("🔐 Auto Password Created (First Time):", data);
-
-      return res.json({
-        success: true,
-        firstTime: true,
-        message: "Default password created",
-        data,
-      });
-    }
-
-    // ⭐ If already exists → return normally
-    return res.json({
-      success: true,
-      firstTime: false,
-      data: snap.val(),
-    });
-
-  } catch (err) {
-    console.error("❌ Password Fetch Error:", err);
-    res.status(500).json({ success: false, message: "Server Error" });
-  }
-};
 
 /* ============================================================
    ⭐ SET / CHANGE ADMIN PASSWORD
@@ -84,19 +44,46 @@ export const setAdminPassword = async (req, res) => {
 /* ============================================================
    ⭐ VERIFY PASSWORD
 ============================================================ */
+/* ============================================================
+   ⭐ VERIFY PASSWORD (AUTO CREATE ON FIRST TIME)
+============================================================ */
 export const verifyPassword = async (req, res) => {
   try {
     const { password } = req.body;
 
-    const snap = await rtdb.ref(PASSWORD_NODE).get();
-
-    if (!snap.exists()) {
+    if (!password || password.trim() === "") {
       return res.status(400).json({
         success: false,
-        message: "Password not set"
+        message: "Password required"
       });
     }
 
+    const snap = await rtdb.ref(PASSWORD_NODE).get();
+
+    /* ============================================================
+       ⭐ FIRST TIME LOGIN → AUTO SET THE ENTERED PASSWORD
+    ============================================================= */
+    if (!snap.exists()) {
+      const data = {
+        password,
+        updatedAt: Date.now(),
+      };
+
+      await rtdb.ref(PASSWORD_NODE).set(data);
+
+      console.log("🔐 First-Time Password Set:", data);
+
+      return res.json({
+        success: true,
+        firstTime: true,
+        message: "New password created and verified",
+        data,
+      });
+    }
+
+    /* ============================================================
+       ⭐ NORMAL VERIFY
+    ============================================================= */
     const savedPassword = snap.val().password;
 
     if (password !== savedPassword) {
@@ -108,7 +95,8 @@ export const verifyPassword = async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Password verified"
+      firstTime: false,
+      message: "Password verified successfully",
     });
 
   } catch (err) {
@@ -116,7 +104,6 @@ export const verifyPassword = async (req, res) => {
     res.status(500).json({ success: false, message: "Server Error" });
   }
 };
-
 /* ============================================================
    ⭐ GET ADMIN NUMBER (OLD)
 ============================================================ */
