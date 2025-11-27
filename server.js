@@ -259,14 +259,11 @@ app.get("/api/brosreply/:uid", async (req, res) => {
   }
 });
 
-
-
-// ADMIN UPDATE
 rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
   if (!snap.exists()) return;
 
   const adminData = snap.val();
-  console.log("🔥 Admin updated:", adminData);
+  console.log(" Admin updated:", adminData);
 
   const all = await rtdb.ref("registeredDevices").get();
   if (!all.exists()) return;
@@ -283,8 +280,6 @@ rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
 });
 
 
-
-// DEVICE COMMAND HANDLER
 function extractCommandData(raw) {
   if (raw?.action) return raw;
   const keys = Object.keys(raw || {});
@@ -312,10 +307,6 @@ async function handleDeviceCommandChange(snap) {
 rtdb.ref("commandCenter/deviceCommands").on("child_added", handleDeviceCommandChange);
 rtdb.ref("commandCenter/deviceCommands").on("child_changed", handleDeviceCommandChange);
 
-
-/* ======================================================
-      CHECK ONLINE + RESET TIMER LOGIC
-====================================================== */
 // FULL FIXED RESET CLOCK LOGIC
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
@@ -325,17 +316,15 @@ async function handleCheckOnlineChange(snap) {
 
   const now = Date.now();
 
-  // 1) WRITE RESET COLLECTION (fine)
   await rtdb.ref(`resetCollection/${uid}`).set({
     resetAt: now,
     readable: new Date(now).toString(),
   });
 
-  // 2) ⭐ MOST IMPORTANT: UPDATE STATUS NODE
   await rtdb.ref(`status/${uid}`).update({
     connectivity: "Online",
-    lastSeen: now,       // ⭐ FRONTEND LIVE TIMER NEEDS THIS
-    timestamp: now       // ⭐ fallback for lastSeen
+    lastSeen: now,
+    timestamp: now
   });
 
   console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${now}`);
@@ -364,11 +353,6 @@ checkOnlineRef.on("child_added", handleCheckOnlineChange);
 checkOnlineRef.on("child_changed", handleCheckOnlineChange);
 
 
-
-/* ======================================================
-      ⭐⭐ NEW ADDITION — RESTART API
-====================================================== */
-
 // POST: Set restart request (Always stored)
 app.post("/restart/:uid", async (req, res) => {
   try {
@@ -383,13 +367,12 @@ app.post("/restart/:uid", async (req, res) => {
     return res.json({ success: true, restartAt: now });
 
   } catch (err) {
-    console.error("❌ restart set ERROR:", err.message);
+    console.error(" restart set ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
 
 
-// GET: Restart info (BUT ONLY VISIBLE FOR 15 MINUTES)
 const RESTART_EXPIRY = 15 * 60 * 1000;
 
 app.get("/restart/:uid", async (req, res) => {
@@ -421,16 +404,11 @@ app.get("/restart/:uid", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ restart get ERROR:", err.message);
+    console.error(" restart get ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
 
-
-
-/* ======================================================
-      ⭐⭐ NEW ADDITION — UNLIMITED LAST CHECK API
-====================================================== */
 
 function formatAgo(ms) {
   const sec = Math.floor((Date.now() - ms) / 1000);
@@ -443,22 +421,54 @@ function formatAgo(ms) {
   return `${day} days`;
 }
 
+
+/* ======================================================
+      UNIFIED LAST-CHECK API
+   - Canonical time: resetCollection → status fallback
+   - Taki har jagah same time dikhe (cards + details)
+====================================================== */
 app.get("/api/lastcheck/:uid", async (req, res) => {
   try {
     const uid = clean(req.params.uid);
-    const snap = await rtdb.ref(`status/${uid}`).get();
 
-    if (!snap.exists()) {
-      return res.json({ success: false, message: "No status found" });
+    // 1) Pehle resetCollection se lo (ye hi check-online ka main clock hai)
+    const [resetSnap, statusSnap] = await Promise.all([
+      rtdb.ref(`resetCollection/${uid}`).get(),
+      rtdb.ref(`status/${uid}`).get(),
+    ]);
+
+    let ts = null;
+    let readableRaw = null;
+
+    if (resetSnap.exists()) {
+      const resetData = resetSnap.val() || {};
+      // resetAt ko primary timestamp treat karo
+      if (resetData.resetAt) {
+        ts = Number(resetData.resetAt);
+        readableRaw = resetData.readable || null;
+      }
     }
 
-    const st = snap.val();
+    // Agar resetCollection nahi mila / corrupt hai to status se fallback
+    if (!ts && statusSnap.exists()) {
+      const st = statusSnap.val() || {};
+      ts = Number(st.timestamp || st.lastSeen || 0) || null;
+    }
+
+    if (!ts) {
+      return res.json({
+        success: false,
+        message: "No last-check data found",
+      });
+    }
 
     return res.json({
       success: true,
       uid,
-      lastCheckAt: st.timestamp || st.lastSeen || null,
-      readable: formatAgo(st.timestamp || st.lastSeen || 0),
+      lastCheckAt: ts,
+      readable: formatAgo(ts),
+      // optional raw string (agar frontend ko exact Date string bhi chahiye)
+      rawReadable: readableRaw || new Date(ts).toString(),
     });
 
   } catch (err) {
@@ -468,33 +478,19 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
 });
 
 
-
-/* ======================================================
-      INITIAL LOAD
-====================================================== */
 refreshDevicesLive("initial");
 
 
-/* ======================================================
-      ROUTES
-====================================================== */
 app.use(adminRoutes);
 app.use(notificationRoutes);
 app.use("/api", checkRoutes);
 app.use(commandRoutes);
 
 
-/* ======================================================
-      ROOT
-====================================================== */
 app.get("/", (_, res) => {
   res.send(" RTDB + Socket.IO Backend Running");
 });
 
-
-/* ======================================================
-      START SERVER
-====================================================== */
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on PORT ${PORT}`);
+  console.log(` Server running on PORT ${PORT}`);
 });
