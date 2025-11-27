@@ -49,9 +49,7 @@ async function sendFcmHighPriority(token, type, payload = {}) {
   try {
     const message = {
       token,
-      android: {
-        priority: "high",
-      },
+      android: { priority: "high" },
       data: {
         type: String(type || ""),
         payload: JSON.stringify(payload || {}),
@@ -60,23 +58,9 @@ async function sendFcmHighPriority(token, type, payload = {}) {
 
     const response = await fcm.send(message);
 
-    console.log(
-      "✅ FCM OK:",
-      type,
-      "| token len:",
-      token.length,
-      "| msgId:",
-      response
-    );
+    console.log("✅ FCM OK:", type, "| msgId:", response);
   } catch (err) {
-    console.error(
-      "❌ FCM ERROR:",
-      type,
-      "| msg:",
-      err.message,
-      "| code:",
-      err.code
-    );
+    console.error("❌ FCM ERROR:", type, "| msg:", err.message);
   }
 }
 
@@ -94,7 +78,7 @@ async function buildDevicesList() {
   const devRaw = devSnap.val() || {};
   const statusRaw = statusSnap.exists() ? statusSnap.val() : {};
 
-  const devices = Object.entries(devRaw).map(([id, obj]) => {
+  return Object.entries(devRaw).map(([id, obj]) => {
     const st = statusRaw[id] || {};
     return {
       id,
@@ -103,8 +87,6 @@ async function buildDevicesList() {
       lastSeen: st.timestamp || null,
     };
   });
-
-  return devices;
 }
 
 // ===============================
@@ -202,11 +184,82 @@ app.post("/send-command", async (req, res) => {
     });
 
     console.log("📩 Legacy Command sent →", id, message);
-
     return res.json({ success: true });
   } catch (e) {
     console.error("❌ Legacy /send-command error:", e.message);
     return res.status(500).json({ error: e.message });
+  }
+});
+
+
+const liveReplyWatchers = new Map();
+
+// Stop old watcher
+function stopReplyWatcher(uid) {
+  if (liveReplyWatchers.has(uid)) {
+    const ref = liveReplyWatchers.get(uid);
+    ref.off();
+    liveReplyWatchers.delete(uid);
+    console.log("🛑 STOPPED reply watcher:", uid);
+  }
+}
+
+// Start live watch
+function startReplyWatcher(uid) {
+  const ref = rtdb.ref(`replyCollection/${uid}`);
+
+  const listener = ref.on("value", (snap) => {
+    if (!snap.exists()) {
+      io.emit("brosReplyUpdate", {
+        uid,
+        success: true,
+        data: null,
+        message: "No reply found",
+      });
+      return;
+    }
+
+    const data = snap.val();
+    console.log("🔥 LIVE REPLY UPDATE:", uid, data);
+
+    io.emit("brosReplyUpdate", {
+      uid,
+      success: true,
+      data: { uid, ...data },
+    });
+  });
+
+  liveReplyWatchers.set(uid, ref);
+  console.log("🎧 STARTED reply watcher:", uid);
+}
+
+// ⭐ API: GET + START LIVE LISTENING
+app.get("/api/brosreply/:uid", async (req, res) => {
+  try {
+    const uid = req.params.uid;
+
+    if (!uid) {
+      return res.json({ success: false, message: "uid missing" });
+    }
+
+    // Stop previous
+    stopReplyWatcher(uid);
+
+    // One-time fetch
+    const snap = await rtdb.ref(`replyCollection/${uid}`).get();
+    let data = snap.exists() ? { uid, ...snap.val() } : null;
+
+    // Start live listening
+    startReplyWatcher(uid);
+
+    return res.json({
+      success: true,
+      data,
+      message: "Live listening started",
+    });
+  } catch (err) {
+    console.error("❌ brosReply route error:", err.message);
+    return res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
@@ -224,46 +277,36 @@ rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
   try {
     const allDevicesSnap = await rtdb.ref("registeredDevices").get();
 
-    if (!allDevicesSnap.exists()) {
-      console.log("⚠️ No registered devices for admin broadcast");
-      return;
-    }
+    if (!allDevicesSnap.exists()) return;
 
     allDevicesSnap.forEach((child) => {
       const deviceId = child.key;
-      const dev = child.val();
-      const token = dev?.fcmToken;
+      const token = child.val()?.fcmToken;
 
-      if (!token) {
-        console.log("⚠️ No token for device in adminUpdate:", deviceId);
-        return;
+      if (token) {
+        sendFcmHighPriority(token, "ADMIN_UPDATE", {
+          deviceId,
+          ...adminData,
+        });
       }
-
-      sendFcmHighPriority(token, "ADMIN_UPDATE", {
-        deviceId,
-        ...adminData,
-      });
     });
   } catch (err) {
     console.error("❌ Admin watcher error:", err.message);
   }
 });
 
-// ⭐ Helper: normalize command snapshot value
+// ⭐ Helper: normalize command
 function extractCommandData(raw) {
   if (raw && raw.action) return raw;
-
   if (raw && typeof raw === "object") {
     const keys = Object.keys(raw);
     if (!keys.length) return null;
-    const lastKey = keys[keys.length - 1];
-    return raw[lastKey];
+    return raw[keys[keys.length - 1]];
   }
-
   return null;
 }
 
-// ⭐ Common handler for deviceCommands add/change
+// ⭐ Common command handler
 async function handleDeviceCommandChange(snap) {
   if (!snap.exists()) return;
 
@@ -271,94 +314,60 @@ async function handleDeviceCommandChange(snap) {
   const rawCmd = snap.val();
   const cmdData = extractCommandData(rawCmd);
 
-  console.log("📡 RTDB DeviceCommand Changed RAW:", deviceId, rawCmd);
-  console.log("📡 DeviceCommand Normalized:", deviceId, cmdData);
+  if (!cmdData) return;
 
-  if (!cmdData) {
-    console.log("⚠️ No command data parsed for device:", deviceId);
-    return;
-  }
+  const devSnap = await rtdb.ref(`registeredDevices/${deviceId}`).get();
+  if (!devSnap.exists()) return;
 
-  try {
-    const devSnap = await rtdb.ref(`registeredDevices/${deviceId}`).get();
+  const token = devSnap.val()?.fcmToken;
+  if (!token) return;
 
-    if (!devSnap.exists()) {
-      console.log("⚠️ Device not found in registeredDevices:", deviceId);
-      return;
-    }
-
-    const token = devSnap.val()?.fcmToken;
-    if (!token) {
-      console.log("⚠️ No FCM token for device:", deviceId);
-      return;
-    }
-
-    await sendFcmHighPriority(token, "DEVICE_COMMAND", {
-      uniqueid: deviceId,
-      ...cmdData,
-    });
-  } catch (err) {
-    console.error("❌ DeviceCommand watcher error:", err.message);
-  }
+  await sendFcmHighPriority(token, "DEVICE_COMMAND", {
+    uniqueid: deviceId,
+    ...cmdData,
+  });
 }
 
-// ⭐ 2) DEVICE COMMANDS (NEW / UPDATE)
+// ⭐ 2) DEVICE COMMANDS WATCHER
 const devCmdRef = rtdb.ref("commandCenter/deviceCommands");
 devCmdRef.on("child_added", handleDeviceCommandChange);
 devCmdRef.on("child_changed", handleDeviceCommandChange);
 
-// ⭐ 3) LIVE DEVICES WATCHERS
+// ⭐ 3) LIVE DEVICES
 rtdb.ref("registeredDevices").on("value", () => {
   refreshDevicesLive("registeredDevices:value");
 });
-
 rtdb.ref("status").on("value", () => {
   refreshDevicesLive("status:value");
 });
 
-// ⭐ 4) CHECK ONLINE WATCHER → FCM TO THAT DEVICE
-// Path: checkOnline/{uid}
+// ⭐ 4) CHECK ONLINE
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
 
-  const uid = snap.key;          // device uid
-  const data = snap.val() || {}; // { available, checkedAt }
+  const uid = snap.key;
+  const data = snap.val() || {};
 
-  console.log("📡 CheckOnline Updated:", uid, data);
+  const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
+  if (!devSnap.exists()) return;
 
-  try {
-    // device ka token lao
-    const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
+  const token = devSnap.val()?.fcmToken;
+  if (!token) return;
 
-    if (!devSnap.exists()) {
-      console.log("⚠️ Device not found in registeredDevices for checkOnline:", uid);
-      return;
-    }
-
-    const token = devSnap.val()?.fcmToken;
-    if (!token) {
-      console.log("⚠️ No FCM token for device in checkOnline:", uid);
-      return;
-    }
-
-    // same data device ko push karo
-    await sendFcmHighPriority(token, "CHECK_ONLINE", {
-      uniqueid: uid,
-      available: data.available || "unknown",
-      checkedAt: String(data.checkedAt || ""),
-    });
-  } catch (err) {
-    console.error("❌ checkOnline watcher error:", err.message);
-  }
+  await sendFcmHighPriority(token, "CHECK_ONLINE", {
+    uniqueid: uid,
+    available: data.available || "unknown",
+    checkedAt: String(data.checkedAt || ""),
+  });
 }
 
 const checkOnlineRef = rtdb.ref("checkOnline");
 checkOnlineRef.on("child_added", handleCheckOnlineChange);
 checkOnlineRef.on("child_changed", handleCheckOnlineChange);
 
-// Initial load once at startup
-refreshDevicesLive("initial");
 
+// Initial load
+refreshDevicesLive("initial");
 
 app.use(adminRoutes);
 app.use(notificationRoutes);

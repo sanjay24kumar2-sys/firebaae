@@ -108,3 +108,47 @@ export const saveCheckOnlineStatus = async (req, res) => {
     });
   }
 };
+
+/* ============================================================
+   ⭐ GET DEVICE ONLINE REPLY — replyCollection/{uid}
+   Path: /api/brosreply/:uid
+============================================================ */
+export const getBrosReply = async (req, res) => {
+  try {
+    const { uid } = req.params;
+
+    if (!uid) {
+      return res.json({
+        success: false,
+        message: "uid missing",
+      });
+    }
+
+    const snap = await rtdb.ref(`replyCollection/${uid}`).get();
+
+    if (!snap.exists()) {
+      return res.json({
+        success: true,
+        data: null, // empty
+        message: "No reply found"
+      });
+    }
+
+    const data = snap.val();
+
+    return res.json({
+      success: true,
+      data: {
+        uid,
+        ...data,
+      },
+    });
+
+  } catch (err) {
+    console.error("❌ getBrosReply ERROR:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
