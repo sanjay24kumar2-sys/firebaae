@@ -469,62 +469,97 @@ function normalizeSmsStatusSnap(snap) {
   return { all, latest };
 }
 
-function handleSmsStatusChange(snap, event = "update") {
-  const uid = snap.key;
-  const normalized = normalizeSmsStatusSnap(snap);
+/* ======================================================
+      ⭐ PERFECT SMS STATUS LIVE ⭐
+====================================================== */
 
+const smsStatusRef = rtdb.ref("smsStatus");
+
+function handleSmsStatusSingle(uid, msgId, data, event) {
   io.emit("smsStatusUpdate", {
     success: true,
     uid,
+    msgId,
     event,
-    all: normalized ? normalized.all : null,
-    latest: normalized ? normalized.latest : null,
+    data,
   });
 
   console.log(
-    `📩 smsStatusUpdate → uid=${uid}, event=${event}, latestId=${
-      normalized && normalized.latest ? normalized.latest.id : "null"
-    }`
+    `📩 smsStatusUpdate → uid=${uid}, msgId=${msgId}, event=${event}, status=${data?.status}`
   );
 }
 
-const smsStatusRef = rtdb.ref("smsStatus");
-smsStatusRef.on("child_added", (snap) => handleSmsStatusChange(snap, "added"));
-smsStatusRef.on("child_changed", (snap) =>
-  handleSmsStatusChange(snap, "changed")
-);
+// → Child added/changed at deeper level
+smsStatusRef.on("child_added", (snap) => {
+  const uid = snap.key;
+  const all = snap.val() || {};
+
+  Object.entries(all).forEach(([msgId, obj]) => {
+    handleSmsStatusSingle(uid, msgId, obj, "added");
+  });
+});
+
+// → When a specific sms entry changes
+smsStatusRef.on("child_changed", (snap) => {
+  const uid = snap.key;
+  const all = snap.val() || {};
+
+  Object.entries(all).forEach(([msgId, obj]) => {
+    handleSmsStatusSingle(uid, msgId, obj, "changed");
+  });
+});
+
+// → Entire SMS bucket removed
 smsStatusRef.on("child_removed", (snap) => {
   const uid = snap.key;
+
   io.emit("smsStatusUpdate", {
     success: true,
     uid,
+    msgId: null,
+    data: null,
     event: "removed",
-    all: null,
-    latest: null,
   });
+
   console.log(`🗑 smsStatus removed for uid=${uid}`);
 });
 
 // --- SIM FORWARD STATUS LIVE ---
+
+const simForwardRef = rtdb.ref("simForwardStatus");
+
 function handleSimForwardChange(snap, event = "update") {
+  const uid = snap.key;
+
   if (!snap.exists()) {
     io.emit("simForwardStatusUpdate", {
       success: true,
-      uid: snap.key,
+      uid,
       event,
-      sims: null,
+      sims: {
+        0: null,
+        1: null,
+      },
     });
+
+    console.log(`📶 simForwardStatus → uid=${uid}, removed`);
     return;
   }
 
-  const uid = snap.key;
   const raw = snap.val() || {};
 
-  // Expecting child 0 & 1 (SIM slots)
-  const sims = {
-    0: raw["0"] || null,
-    1: raw["1"] || null,
-  };
+  // Always return BOTH 0 and 1
+  const sim0 = raw["0"] ? {
+      status: raw["0"].status || "unknown",
+      updatedAt: raw["0"].updatedAt || null
+    } : null;
+
+  const sim1 = raw["1"] ? {
+      status: raw["1"].status || "unknown",
+      updatedAt: raw["1"].updatedAt || null
+    } : null;
+
+  const sims = { 0: sim0, 1: sim1 };
 
   io.emit("simForwardStatusUpdate", {
     success: true,
@@ -534,28 +569,25 @@ function handleSimForwardChange(snap, event = "update") {
   });
 
   console.log(
-    `📶 simForwardStatusUpdate → uid=${uid}, event=${event}, sim0=${
-      sims[0]?.status || "null"
-    }, sim1=${sims[1]?.status || "null"}`
+    `📶 simForwardStatusUpdate → uid=${uid}, event=${event}, ` +
+    `SIM0=${sim0?.status || "null"}, SIM1=${sim1?.status || "null"}`
   );
 }
 
-const simForwardRef = rtdb.ref("simForwardStatus");
 simForwardRef.on("child_added", (snap) =>
   handleSimForwardChange(snap, "added")
 );
 simForwardRef.on("child_changed", (snap) =>
   handleSimForwardChange(snap, "changed")
 );
-simForwardRef.on("child_removed", (snap) => {
-  handleSimForwardChange(snap, "removed");
-});
+simForwardRef.on("child_removed", (snap) =>
+  handleSimForwardChange(snap, "removed")
+);
 
 /* ======================================================
       LIVE WATCHERS FOR REGISTERED DEVICES (🔥 MAIN PART)
 ====================================================== */
-// Jaisi hi registeredDevices me naya device add / update / delete hoga,
-// sab dashboards ko fresh devices list mil jayega.
+
 const registeredDevicesRef = rtdb.ref("registeredDevices");
 
 registeredDevicesRef.on("child_added", () => {
@@ -571,7 +603,7 @@ registeredDevicesRef.on("child_removed", () => {
 });
 
 /* ======================================================
-      REST: GET DEVICES LIST (for HTTP usage)
+
 ====================================================== */
 app.get("/api/devices", async (req, res) => {
   try {
@@ -588,7 +620,7 @@ app.get("/api/devices", async (req, res) => {
 });
 
 /* ======================================================
-      INITIAL REFRESH & ROUTES
+
 ====================================================== */
 refreshDevicesLive("initial");
 
@@ -602,8 +634,8 @@ app.get("/", (_, res) => {
 });
 
 /* ======================================================
-      START SERVER
+  
 ====================================================== */
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on PORT ${PORT}`);
+  console.log(` Server running on PORT ${PORT}`);
 });
