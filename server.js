@@ -1,5 +1,5 @@
 // ===============================================
-//  SERVER.JS — FULL MASTER VERSION (A-TO-Z)
+//  SERVER.JS — FULL MASTER VERSION (A-TO-Z, FIXED)
 // ===============================================
 
 import dotenv from "dotenv";
@@ -112,19 +112,33 @@ async function refreshDevicesLive(reason = "") {
 }
 
 /* ======================================================
-      SOCKET.IO CONNECTION HANDLING
+      SOCKET.IO CONNECTION HANDLING  ✅ FIXED
 ====================================================== */
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
   console.log("🔗 Client Connected:", socket.id);
 
   let currentDeviceId = null;
 
-  // Send initial list
-  socket.emit("devicesLive", {
-    success: true,
-    count: lastDevicesList.length,
-    data: lastDevicesList,
-  });
+  // ⭐ FIX: always send a fresh devices list on new connection
+  try {
+    const initialDevices =
+      lastDevicesList && lastDevicesList.length
+        ? lastDevicesList
+        : await buildDevicesList();
+
+    socket.emit("devicesLive", {
+      success: true,
+      count: initialDevices.length,
+      data: initialDevices,
+    });
+
+    console.log(
+      `📡 initial devicesLive → ${initialDevices.length} devices sent to ${socket.id}`
+    );
+  } catch (err) {
+    console.error("❌ initial devicesLive ERROR:", err.message);
+    socket.emit("devicesLive", { success: false, count: 0, data: [] });
+  }
 
   /* ========== DEVICE REGISTRATION VIA SOCKET ========== */
   socket.on("registerDevice", async (rawId) => {
