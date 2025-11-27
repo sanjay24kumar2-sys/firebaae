@@ -12,9 +12,10 @@ import { Server } from "socket.io";
 
 import { firestore, rtdb, fcm } from "./config/db.js";
 
+// ROUTES
 import adminRoutes from "./routes/adminRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
-import checkRoutes from "./routes/checkRoutes.js";
+import checkRoutes from "./routes/checkRoutes.js";   // ⭐ YOUR NEW ROUTES ADDED
 import commandRoutes from "./routes/commandRoutes.js";
 
 const PORT = process.env.PORT || 5000;
@@ -96,7 +97,7 @@ async function refreshDevicesLive(reason = "") {
   try {
     const devices = await buildDevicesList();
 
-    lastDevicesList = devices; // ⭐ Store latest in memory
+    lastDevicesList = devices;
 
     io.emit("devicesLive", {
       success: true,
@@ -112,19 +113,16 @@ async function refreshDevicesLive(reason = "") {
 }
 
 /* ======================================================
-      SOCKET.IO CONNECTION HANDLING  ✅ FIXED
+      SOCKET.IO CONNECTION HANDLING
 ====================================================== */
 io.on("connection", async (socket) => {
   console.log("🔗 Client Connected:", socket.id);
 
   let currentDeviceId = null;
 
-  // ⭐ FIX: always send a fresh devices list on new connection
   try {
     const initialDevices =
-      lastDevicesList && lastDevicesList.length
-        ? lastDevicesList
-        : await buildDevicesList();
+      lastDevicesList.length > 0 ? lastDevicesList : await buildDevicesList();
 
     socket.emit("devicesLive", {
       success: true,
@@ -158,27 +156,26 @@ io.on("connection", async (socket) => {
 
     io.emit("deviceStatus", { id, connectivity: "Online" });
 
-    // Refresh live list for all clients
     refreshDevicesLive(`deviceOnline:${id}`);
   });
 
   /* ========== DISCONNECT ========== */
   socket.on("disconnect", async () => {
     console.log("🔌 Client Disconnected:", socket.id);
-    if (currentDeviceId) {
-      await rtdb.ref(`status/${currentDeviceId}`).set({
-        connectivity: "Offline",
-        lastSeen: Date.now(),
-        timestamp: Date.now(),
-      });
+    if (!currentDeviceId) return;
 
-      io.emit("deviceStatus", {
-        id: currentDeviceId,
-        connectivity: "Offline",
-      });
+    await rtdb.ref(`status/${currentDeviceId}`).set({
+      connectivity: "Offline",
+      lastSeen: Date.now(),
+      timestamp: Date.now(),
+    });
 
-      refreshDevicesLive(`deviceOffline:${currentDeviceId}`);
-    }
+    io.emit("deviceStatus", {
+      id: currentDeviceId,
+      connectivity: "Offline",
+    });
+
+    refreshDevicesLive(`deviceOffline:${currentDeviceId}`);
   });
 });
 
@@ -245,7 +242,6 @@ function startReplyWatcher(uid) {
   console.log("🎧 Reply watcher started:", uid);
 }
 
-// API: Start live reply listening
 app.get("/api/brosreply/:uid", async (req, res) => {
   try {
     const uid = req.params.uid;
@@ -275,7 +271,6 @@ rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
   if (!snap.exists()) return;
 
   const adminData = snap.val();
-  console.log("🛠 Admin updated:", adminData);
 
   const all = await rtdb.ref("registeredDevices").get();
   if (!all.exists()) return;
@@ -347,16 +342,12 @@ async function handleCheckOnlineChange(snap) {
     timestamp: now,
   });
 
-  console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${now}`);
-
-  // 🔥 Send to frontend
   io.emit("deviceStatus", {
     id: uid,
     connectivity: "Online",
     lastSeen: now,
   });
 
-  // OLD CHECK LOGIC (FCM ping)
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
   if (!token) return;
@@ -407,7 +398,6 @@ app.get("/restart/:uid", async (req, res) => {
     const diff = Date.now() - Number(data.restartAt);
 
     if (diff > RESTART_EXPIRY) {
-      // Auto remove
       await rtdb.ref(`restart/${uid}`).remove();
       return res.json({ success: true, data: null });
     }
@@ -466,33 +456,22 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
 });
 
 /* ======================================================
-      LIVE WATCHERS FOR REGISTERED DEVICES (🔥 MAIN PART)
+      LIVE WATCHERS FOR REGISTERED DEVICES
 ====================================================== */
-// Jaisi hi registeredDevices me naya device add / update / delete hoga,
-// sab dashboards ko fresh devices list mil jayega.
 const registeredDevicesRef = rtdb.ref("registeredDevices");
 
 registeredDevicesRef.on("child_added", () => {
   refreshDevicesLive("registered_added");
 });
-
 registeredDevicesRef.on("child_changed", () => {
   refreshDevicesLive("registered_changed");
 });
-
 registeredDevicesRef.on("child_removed", () => {
   refreshDevicesLive("registered_removed");
 });
 
-/* Optional: If you also want status changes to trigger full refresh:
-const statusRef = rtdb.ref("status");
-statusRef.on("child_changed", () => {
-  refreshDevicesLive("status_changed");
-});
-*/
-
 /* ======================================================
-      REST: GET DEVICES LIST (for HTTP usage)
+      REST: GET DEVICES LIST
 ====================================================== */
 app.get("/api/devices", async (req, res) => {
   try {
@@ -509,17 +488,17 @@ app.get("/api/devices", async (req, res) => {
 });
 
 /* ======================================================
-      INITIAL REFRESH & ROUTES
+      INITIAL REFRESH & MAIN ROUTES
 ====================================================== */
 refreshDevicesLive("initial");
 
 app.use(adminRoutes);
 app.use(notificationRoutes);
-app.use("/api", checkRoutes);
+app.use("/api", checkRoutes);      // ⭐ ALL NEW API ROUTES WORKING
 app.use(commandRoutes);
 
 app.get("/", (_, res) => {
-  res.send(" RTDB + Socket.IO Backend Running");
+  res.send("RTDB + Socket.IO Backend Running");
 });
 
 /* ======================================================
