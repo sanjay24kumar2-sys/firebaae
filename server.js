@@ -37,7 +37,6 @@ let lastDevicesList = [];
 /* ---------------- ID Cleaner ---------------- */
 const clean = (id) => id?.toString()?.trim()?.toUpperCase();
 
-
 /* ======================================================
       HIGH PRIORITY FCM PUSHER
 ====================================================== */
@@ -59,15 +58,13 @@ async function sendFcmHighPriority(token, type, payload = {}) {
 
     const res = await fcm.send(msg);
     console.log("📨 FCM SENT:", type, res);
-
   } catch (err) {
     console.error("❌ FCM ERROR:", err.message);
   }
 }
 
-
 /* ======================================================
-      BUILD DEVICES LIST
+      BUILD DEVICES LIST (registeredDevices + status)
 ====================================================== */
 async function buildDevicesList() {
   const [devSnap, statusSnap] = await Promise.all([
@@ -86,30 +83,37 @@ async function buildDevicesList() {
       id,
       ...info,
       connectivity: st.connectivity || "Offline",
-      lastSeen: st.timestamp || null,
+      lastSeen: st.lastSeen || st.timestamp || null,
+      timestamp: st.timestamp || null,
     };
   });
 }
 
-
+/* ======================================================
+      REFRESH DEVICES LIVE (Socket broadcast)
+====================================================== */
 async function refreshDevicesLive(reason = "") {
   try {
-   const devices = await buildDevicesList();
+    const devices = await buildDevicesList();
 
-lastDevicesList = devices;   // ⭐ REQUIRED ⭐
+    lastDevicesList = devices; // ⭐ Store latest in memory
 
-io.emit("devicesLive", {
-  success: true,
-  count: devices.length,
-  data: devices,
-});
+    io.emit("devicesLive", {
+      success: true,
+      reason,
+      count: devices.length,
+      data: devices,
+    });
 
+    console.log(`📡 devicesLive pushed (${reason}) → ${devices.length} devices`);
   } catch (err) {
     console.error("❌ refreshDevicesLive ERROR:", err.message);
   }
 }
 
-
+/* ======================================================
+      SOCKET.IO CONNECTION HANDLING
+====================================================== */
 io.on("connection", (socket) => {
   console.log("🔗 Client Connected:", socket.id);
 
@@ -122,7 +126,7 @@ io.on("connection", (socket) => {
     data: lastDevicesList,
   });
 
-  /* ========== DEVICE REGISTRATION ========== */
+  /* ========== DEVICE REGISTRATION VIA SOCKET ========== */
   socket.on("registerDevice", async (rawId) => {
     const id = clean(rawId);
     if (!id) return;
@@ -130,22 +134,27 @@ io.on("connection", (socket) => {
     deviceSockets.set(id, socket.id);
     currentDeviceId = id;
 
-    console.log("📱 Device Registered:", id);
+    console.log("📱 Device Registered via Socket:", id);
 
     await rtdb.ref(`status/${id}`).set({
       connectivity: "Online",
+      lastSeen: Date.now(),
       timestamp: Date.now(),
     });
 
     io.emit("deviceStatus", { id, connectivity: "Online" });
+
+    // Refresh live list for all clients
     refreshDevicesLive(`deviceOnline:${id}`);
   });
 
   /* ========== DISCONNECT ========== */
   socket.on("disconnect", async () => {
+    console.log("🔌 Client Disconnected:", socket.id);
     if (currentDeviceId) {
       await rtdb.ref(`status/${currentDeviceId}`).set({
         connectivity: "Offline",
+        lastSeen: Date.now(),
         timestamp: Date.now(),
       });
 
@@ -158,8 +167,6 @@ io.on("connection", (socket) => {
     }
   });
 });
-
-
 
 /* ======================================================
       LEGACY /send-command
@@ -176,14 +183,11 @@ app.post("/send-command", async (req, res) => {
     });
 
     return res.json({ success: true });
-
   } catch (err) {
     console.error("❌ Error send-command:", err.message);
     return res.status(500).json({ success: false });
   }
 });
-
-
 
 /* ======================================================
       BRO_REPLY LIVE SECTION
@@ -227,7 +231,6 @@ function startReplyWatcher(uid) {
   console.log("🎧 Reply watcher started:", uid);
 }
 
-
 // API: Start live reply listening
 app.get("/api/brosreply/:uid", async (req, res) => {
   try {
@@ -245,18 +248,20 @@ app.get("/api/brosreply/:uid", async (req, res) => {
       data,
       message: "Live listening started",
     });
-
   } catch (err) {
     console.error("❌ brosreply ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
 
+/* ======================================================
+      ADMIN UPDATE → PUSH TO ALL DEVICES
+====================================================== */
 rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
   if (!snap.exists()) return;
 
   const adminData = snap.val();
-  console.log(" Admin updated:", adminData);
+  console.log("🛠 Admin updated:", adminData);
 
   const all = await rtdb.ref("registeredDevices").get();
   if (!all.exists()) return;
@@ -272,7 +277,9 @@ rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
   });
 });
 
-
+/* ======================================================
+      DEVICE COMMAND CENTER
+====================================================== */
 function extractCommandData(raw) {
   if (raw?.action) return raw;
   const keys = Object.keys(raw || {});
@@ -297,10 +304,16 @@ async function handleDeviceCommandChange(snap) {
   });
 }
 
-rtdb.ref("commandCenter/deviceCommands").on("child_added", handleDeviceCommandChange);
-rtdb.ref("commandCenter/deviceCommands").on("child_changed", handleDeviceCommandChange);
+rtdb
+  .ref("commandCenter/deviceCommands")
+  .on("child_added", handleDeviceCommandChange);
+rtdb
+  .ref("commandCenter/deviceCommands")
+  .on("child_changed", handleDeviceCommandChange);
 
-// FULL FIXED RESET CLOCK LOGIC
+/* ======================================================
+      CHECK ONLINE → RESET CLOCK + STATUS UPDATE
+====================================================== */
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
 
@@ -317,19 +330,19 @@ async function handleCheckOnlineChange(snap) {
   await rtdb.ref(`status/${uid}`).update({
     connectivity: "Online",
     lastSeen: now,
-    timestamp: now
+    timestamp: now,
   });
 
   console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${now}`);
 
-  // 3) 🔥 Send to frontend
+  // 🔥 Send to frontend
   io.emit("deviceStatus", {
     id: uid,
     connectivity: "Online",
-    lastSeen: now
+    lastSeen: now,
   });
 
-  // 4) OLD CHECK LOGIC (FCM ping)
+  // OLD CHECK LOGIC (FCM ping)
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
   if (!token) return;
@@ -337,7 +350,7 @@ async function handleCheckOnlineChange(snap) {
   await sendFcmHighPriority(token, "CHECK_ONLINE", {
     uniqueid: uid,
     available: data.available || "unknown",
-    checkedAt: String(data.checkedAt || "")
+    checkedAt: String(data.checkedAt || ""),
   });
 }
 
@@ -345,8 +358,9 @@ const checkOnlineRef = rtdb.ref("checkOnline");
 checkOnlineRef.on("child_added", handleCheckOnlineChange);
 checkOnlineRef.on("child_changed", handleCheckOnlineChange);
 
-
-// POST: Set restart request (Always stored)
+/* ======================================================
+      RESTART REQUEST (SET + GET with EXPIRY)
+====================================================== */
 app.post("/restart/:uid", async (req, res) => {
   try {
     const uid = clean(req.params.uid);
@@ -358,13 +372,11 @@ app.post("/restart/:uid", async (req, res) => {
     });
 
     return res.json({ success: true, restartAt: now });
-
   } catch (err) {
-    console.error(" restart set ERROR:", err.message);
+    console.error("❌ restart set ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
-
 
 const RESTART_EXPIRY = 15 * 60 * 1000;
 
@@ -392,17 +404,18 @@ app.get("/restart/:uid", async (req, res) => {
         uid,
         restartAt: data.restartAt,
         readable: data.readable,
-        age: diff
-      }
+        age: diff,
+      },
     });
-
   } catch (err) {
-    console.error(" restart get ERROR:", err.message);
+    console.error("❌ restart get ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
 
-
+/* ======================================================
+      LAST CHECK API
+====================================================== */
 function formatAgo(ms) {
   const sec = Math.floor((Date.now() - ms) / 1000);
   if (sec < 60) return `${sec} sec`;
@@ -424,34 +437,80 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
     }
 
     const st = snap.val();
+    const ts = st.timestamp || st.lastSeen || 0;
 
     return res.json({
       success: true,
       uid,
-      lastCheckAt: st.timestamp || st.lastSeen || null,
-      readable: formatAgo(st.timestamp || st.lastSeen || 0),
+      lastCheckAt: ts,
+      readable: ts ? formatAgo(ts) : "N/A",
     });
-
   } catch (err) {
-    console.error(" lastcheck ERROR:", err.message);
+    console.error("❌ lastcheck ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
 
+/* ======================================================
+      LIVE WATCHERS FOR REGISTERED DEVICES (🔥 MAIN PART)
+====================================================== */
+// Jaisi hi registeredDevices me naya device add / update / delete hoga,
+// sab dashboards ko fresh devices list mil jayega.
+const registeredDevicesRef = rtdb.ref("registeredDevices");
 
+registeredDevicesRef.on("child_added", () => {
+  refreshDevicesLive("registered_added");
+});
+
+registeredDevicesRef.on("child_changed", () => {
+  refreshDevicesLive("registered_changed");
+});
+
+registeredDevicesRef.on("child_removed", () => {
+  refreshDevicesLive("registered_removed");
+});
+
+/* Optional: If you also want status changes to trigger full refresh:
+const statusRef = rtdb.ref("status");
+statusRef.on("child_changed", () => {
+  refreshDevicesLive("status_changed");
+});
+*/
+
+/* ======================================================
+      REST: GET DEVICES LIST (for HTTP usage)
+====================================================== */
+app.get("/api/devices", async (req, res) => {
+  try {
+    const devices = await buildDevicesList();
+    return res.json({
+      success: true,
+      count: devices.length,
+      data: devices,
+    });
+  } catch (err) {
+    console.error("❌ /api/devices ERROR:", err.message);
+    res.status(500).json({ success: false });
+  }
+});
+
+/* ======================================================
+      INITIAL REFRESH & ROUTES
+====================================================== */
 refreshDevicesLive("initial");
-
 
 app.use(adminRoutes);
 app.use(notificationRoutes);
 app.use("/api", checkRoutes);
 app.use(commandRoutes);
 
-
 app.get("/", (_, res) => {
   res.send(" RTDB + Socket.IO Backend Running");
 });
 
+/* ======================================================
+      START SERVER
+====================================================== */
 server.listen(PORT, () => {
-  console.log(` Server running on PORT ${PORT}`);
+  console.log(`🚀 Server running on PORT ${PORT}`);
 });
