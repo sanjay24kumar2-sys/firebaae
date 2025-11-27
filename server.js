@@ -473,10 +473,10 @@ app.use("/api", checkRoutes);
 app.use(commandRoutes);
 
 app.get("/", (_, res) => {
-  res.send("RTDB + Socket.IO Backend Running ❤️");
+  res.send("RTDB + Socket.IO Backend Running ");
 });
 
 // ======================================================
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on PORT ${PORT}`);
+  console.log(` Server running on PORT ${PORT}`);
 });
