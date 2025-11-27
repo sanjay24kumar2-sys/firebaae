@@ -98,16 +98,15 @@ async function buildDevicesList() {
 async function refreshDevicesLive(reason = "") {
   try {
     const devices = await buildDevicesList();
-    lastDevicesList = devices;
 
     console.log(`📡 devicesLive (${reason}) total=${devices.length}`);
 
+    // Always send fresh live data
     io.emit("devicesLive", {
       success: true,
       count: devices.length,
       data: devices,
     });
-
   } catch (err) {
     console.error("❌ refreshDevicesLive ERROR:", err.message);
   }
