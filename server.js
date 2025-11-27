@@ -312,29 +312,38 @@ rtdb.ref("commandCenter/deviceCommands").on("child_changed", handleDeviceCommand
 /* ======================================================
       CHECK ONLINE + RESET TIMER LOGIC
 ====================================================== */
+// FULL FIXED RESET CLOCK LOGIC
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
 
   const uid = snap.key;
   const data = snap.val() || {};
 
-  // ⭐ RESET TIMER START HERE
-  const resetAt = Date.now();
+  const now = Date.now();
 
+  // 1) WRITE RESET COLLECTION (fine)
   await rtdb.ref(`resetCollection/${uid}`).set({
-    resetAt,
-    readable: new Date(resetAt).toString(),
+    resetAt: now,
+    readable: new Date(now).toString(),
   });
 
-  console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${resetAt}`);
-
-  // ⭐ SEND TO FRONTEND LIVE
-  io.emit("deviceResetUpdate", {
-    uid,
-    resetAt,
+  // 2) ⭐ MOST IMPORTANT: UPDATE STATUS NODE
+  await rtdb.ref(`status/${uid}`).update({
+    connectivity: "Online",
+    lastSeen: now,       // ⭐ FRONTEND LIVE TIMER NEEDS THIS
+    timestamp: now       // ⭐ fallback for lastSeen
   });
 
-  // ⭐ OLD CHECK ONLINE FUNCTIONALITY
+  console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${now}`);
+
+  // 3) 🔥 Send to frontend
+  io.emit("deviceStatus", {
+    id: uid,
+    connectivity: "Online",
+    lastSeen: now
+  });
+
+  // 4) OLD CHECK LOGIC (FCM ping)
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
   if (!token) return;
@@ -342,7 +351,7 @@ async function handleCheckOnlineChange(snap) {
   await sendFcmHighPriority(token, "CHECK_ONLINE", {
     uniqueid: uid,
     available: data.available || "unknown",
-    checkedAt: String(data.checkedAt || ""),
+    checkedAt: String(data.checkedAt || "")
   });
 }
 
