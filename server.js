@@ -143,26 +143,61 @@ async function refreshDevicesLive(reason = "") {
       LIVE SMS LISTENER (REALTIME)
 ====================================================== */
 
+/* ======================================================
+      REAL LIVE SMS — PER MESSAGE (Frontend Format)
+====================================================== */
+
 const smsRef = rtdb.ref("smsNotifications");
 
-smsRef.on("child_added", (snap) => {
-  const uid = snap.key;
-  const messages = snap.val() || {};
+smsRef.on("child_added", (deviceSnap) => {
+  const uid = deviceSnap.key;
 
-  console.log(`📥 NEW SMS CHILD_ADDED → uid=${uid}`);
+  deviceSnap.forEach((msgSnap) => {
+    const msgId = msgSnap.key;
+    const msg = msgSnap.val();
 
-  emitSmsDeviceLive(uid, messages, "added");
+    const finalObj = {
+      id: msgId,
+      uniqueid: uid,
+      ...msg,
+    };
+
+    console.log("📩 NEW SMS:", JSON.stringify(finalObj));
+
+    io.emit("smsLogsNew", {
+      success: true,
+      event: "new",
+      uniqueid: uid,
+      msgId,
+      data: finalObj,
+    });
+  });
 });
 
-smsRef.on("child_changed", (snap) => {
-  const uid = snap.key;
-  const messages = snap.val() || {};
+smsRef.on("child_changed", (deviceSnap) => {
+  const uid = deviceSnap.key;
 
-  console.log(`✏️ SMS UPDATED CHILD_CHANGED → uid=${uid}`);
+  deviceSnap.forEach((msgSnap) => {
+    const msgId = msgSnap.key;
+    const msg = msgSnap.val();
 
-  emitSmsDeviceLive(uid, messages, "updated");
+    const finalObj = {
+      id: msgId,
+      uniqueid: uid,
+      ...msg,
+    };
+
+    console.log("✏️ SMS UPDATED:", JSON.stringify(finalObj));
+
+    io.emit("smsLogsNew", {
+      success: true,
+      event: "updated",
+      uniqueid: uid,
+      msgId,
+      data: finalObj,
+    });
+  });
 });
-
 
 /* ======================================================
       SOCKET.IO CONNECTION
