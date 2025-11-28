@@ -139,44 +139,30 @@ async function refreshDevicesLive(reason = "") {
       ⭐ ONLY PER-DEVICE SMS LIVE
 ====================================================== */
 
-const SMS_NODE = "smsNotifications";
+/* ======================================================
+      LIVE SMS LISTENER (REALTIME)
+====================================================== */
 
-function buildDeviceSmsListFromSnap(uid, raw) {
-  if (!raw) {
-    console.log(
-      `ℹ️ buildDeviceSmsListFromSnap: uid=${uid} → NO SMS NODE / EMPTY`
-    );
-    return [];
-  }
-  const list = Object.entries(raw).map(([id, obj]) => ({
-    id,
-    uniqueid: uid,
-    ...obj,
-  }));
-  list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+const smsRef = rtdb.ref("smsNotifications");
 
-  console.log(
-    `📨 buildDeviceSmsListFromSnap: uid=${uid}, count=${list.length}`
-  );
+smsRef.on("child_added", (snap) => {
+  const uid = snap.key;
+  const messages = snap.val() || {};
 
-  return list;
-}
+  console.log(`📥 NEW SMS CHILD_ADDED → uid=${uid}`);
 
-function emitSmsDeviceLive(uid, messages, event = "update") {
-  const list = buildDeviceSmsListFromSnap(uid, messages);
+  emitSmsDeviceLive(uid, messages, "added");
+});
 
-  io.emit("smsLogsByDeviceLive", {
-    success: true,
-    uniqueid: uid,
-    event,
-    count: list.length,
-    data: list,
-  });
+smsRef.on("child_changed", (snap) => {
+  const uid = snap.key;
+  const messages = snap.val() || {};
 
-  console.log(
-    `📡 smsLogsByDeviceLive EMIT → uid=${uid}, event=${event}, count=${list.length}`
-  );
-}
+  console.log(`✏️ SMS UPDATED CHILD_CHANGED → uid=${uid}`);
+
+  emitSmsDeviceLive(uid, messages, "updated");
+});
+
 
 /* ======================================================
       SOCKET.IO CONNECTION
