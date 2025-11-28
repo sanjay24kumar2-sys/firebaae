@@ -111,8 +111,6 @@ export const getAllData = async (req, res) => {
       if (!snap.exists()) continue;
 
       const raw = snap.val();
-
-      // IGNORE ID → ONLY RETURN VALUES
       const arr = Object.values(raw)
         .map(obj => {
           const uid = cleanUID(obj.uniqueid);

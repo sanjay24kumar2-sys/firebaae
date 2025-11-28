@@ -1,9 +1,15 @@
+// routes/smsRoutes.js
+
+import express from "express";
 import { rtdb } from "../config/db.js";
+
+const router = express.Router();
 
 const SMS_NODE = "smsNotifications";
 
 /* ============================================================
    ⭐ 1. GET ALL SMS (All devices)
+   URL: GET /api/sms/all
 ============================================================ */
 export const getAllSmsLogs = async (req, res) => {
   try {
@@ -31,7 +37,6 @@ export const getAllSmsLogs = async (req, res) => {
     finalList.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
     return res.json({ success: true, data: finalList });
-
   } catch (err) {
     console.error("❌ Error:", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -40,6 +45,7 @@ export const getAllSmsLogs = async (req, res) => {
 
 /* ============================================================
    ⭐ 2. GET SMS BY DEVICE ID
+   URL: GET /api/sms/:uniqueid
 ============================================================ */
 export const getSmsByDevice = async (req, res) => {
   try {
@@ -62,7 +68,6 @@ export const getSmsByDevice = async (req, res) => {
     list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
     return res.json({ success: true, data: list });
-
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -71,12 +76,16 @@ export const getSmsByDevice = async (req, res) => {
 
 /* ============================================================
    ⭐ 3. GET LATEST SMS OF DEVICE
+   URL: GET /api/sms/latest/:uniqueid
 ============================================================ */
 export const getLatestSmsByDevice = async (req, res) => {
   try {
     const { uniqueid } = req.params;
 
-    const snap = await rtdb.ref(`${SMS_NODE}/${uniqueid}`).limitToLast(1).get();
+    const snap = await rtdb
+      .ref(`${SMS_NODE}/${uniqueid}`)
+      .limitToLast(1)
+      .get();
 
     if (!snap.exists()) {
       return res.json({ success: true, data: [] });
@@ -93,9 +102,10 @@ export const getLatestSmsByDevice = async (req, res) => {
     list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
     return res.json({ success: true, data: list });
-
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: "Error fetching latest SMS" });
+    res
+      .status(500)
+      .json({ success: false, message: "Error fetching latest SMS" });
   }
 };
