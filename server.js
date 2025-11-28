@@ -561,6 +561,7 @@ function normalizeSmsStatusSnap(snap) {
 /* ======================================================
       ⭐ PERFECT SMS STATUS LIVE ⭐
 ====================================================== */
+const smsStatusRef = rtdb.ref("smsStatus");
 
 function handleSmsStatusSingle(uid, msgId, data, event) {
   if (!lastStatusCache[uid]) lastStatusCache[uid] = {};
@@ -789,7 +790,7 @@ app.get("/api/devices", async (req, res) => {
 });
 
 refreshDevicesLive("initial");
-refreshSmsAllLive("initial"); // ⭐ NEW: initial SMS all list build
+refreshSmsAllLive("initial");
 
 
 app.use(adminRoutes);
