@@ -676,18 +676,31 @@ simForwardRef.on("child_removed", (snap) =>
 );
 
 /* ======================================================
-      ⭐ NEW: SMS LOGS LIVE (smsNotifications node)
-      - Covers:
-          /api/sms/all           → event: smsLogsAllLive
-          /api/sms/:uniqueid     → event: smsLogsByDeviceLive
+      ⭐ NEW: SMS LOGS LIVE + SUPER LOGGING
 ====================================================== */
 
 const smsNotificationsRef = rtdb.ref(SMS_NODE);
 
-// Handle per-device branch
 async function handleSmsNotificationsBranch(snap, event = "update") {
   const uid = snap.key;
   const messages = snap.val() || {};
+
+  // SUPER LOGGING 🔥🔥🔥
+  console.log("\n\n================= 📩 NEW SMS EVENT =================");
+  console.log(`📌 DEVICE: ${uid}`);
+  console.log(`📌 EVENT: ${event}`);
+
+  Object.entries(messages).forEach(([msgId, sms]) => {
+    console.log("---------------------------------------");
+    console.log(`🆔 SMS-ID: ${msgId}`);
+    console.log(`👤 Sender: ${sms.sender || "Unknown"}`);
+    console.log(`📞 Sender Number: ${sms.senderNumber || "Unknown"}`);
+    console.log(`📥 Receiver Number: ${sms.receiverNumber || "Unknown"}`);
+    console.log(`🕒 Timestamp: ${sms.timestamp}`);
+    console.log(`✉️ Message: ${sms.body}`);
+  });
+
+  console.log("====================================================\n\n");
 
   // Emit per-device live list
   emitSmsDeviceLive(uid, messages, event);
@@ -704,8 +717,8 @@ smsNotificationsRef.on("child_changed", (snap) =>
 );
 smsNotificationsRef.on("child_removed", async (snap) => {
   const uid = snap.key;
+  console.log(`🗑 SMS BRANCH REMOVED FOR DEVICE ${uid}`);
 
-  // If branch removed → send empty list for that uid
   emitSmsDeviceLive(uid, {}, "removed");
   await refreshSmsAllLive(`sms_removed:${uid}`);
 });
