@@ -535,33 +535,26 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
 
 /* ======================================================
       LIVE WATCHERS: SMS STATUS + SIM FORWARD STATUS
-      (for routes:
-        GET /device/:uid/sms-status
-        GET /device/:uid/sim-forward
-       same RTDB data ko Socket.IO se live emit karne ke liye)
-//  RTDB structure:
-//  smsStatus/<uid>/<msgId> -> { at, body, reason, resultCode, simSlot, stage, status, ... }
-//  simForwardStatus/<uid>/0|1 -> { status, updatedAt }
-//====================================================== */
+====================================================== */
 
-// --- SMS STATUS LIVE ---
+const smsStatusRef = rtdb.ref("smsStatus");   // ⭐ FIXED: define first
+const lastStatusCache = {};                   // ⭐ status cache
+
 function normalizeSmsStatusSnap(snap) {
   if (!snap.exists()) return null;
   const all = snap.val() || {};
   const keys = Object.keys(all);
   if (!keys.length) return { all: {}, latest: null };
 
-  // last key as "latest" (RTDB push keys are time ordered)
   const lastKey = keys.sort()[keys.length - 1];
   const latest = { id: lastKey, ...(all[lastKey] || {}) };
-
   return { all, latest };
 }
+
 
 /* ======================================================
       ⭐ PERFECT SMS STATUS LIVE ⭐
 ====================================================== */
-const smsStatusRef = rtdb.ref("smsStatus");
 
 function handleSmsStatusSingle(uid, msgId, data, event) {
   if (!lastStatusCache[uid]) lastStatusCache[uid] = {};
