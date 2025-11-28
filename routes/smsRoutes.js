@@ -7,8 +7,8 @@ import {
 
 const router = express.Router();
 
-router.get("/api/sms/all", getAllSmsLogs);
-router.get("/api/sms/:uniqueid", getSmsByDevice);
-router.get("/api/sms/latest/:uniqueid", getLatestSmsByDevice);
+router.get("/all", getAllSmsLogs);
+router.get("/:uniqueid", getSmsByDevice);
+router.get("/latest/:uniqueid", getLatestSmsByDevice);
 
 export default router;

