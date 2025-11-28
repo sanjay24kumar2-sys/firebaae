@@ -1,5 +1,5 @@
 // server.js
-// ✅ A-to-Z Clean + Fixed Version
+// ✅ A-to-Z Clean + Fixed Version (Devices + SMS Live)
 
 import dotenv from "dotenv";
 dotenv.config();
@@ -498,8 +498,7 @@ function handleSmsNotificationsBranch(snap, eventLabel = "update") {
         msgId,
         data: payload,
       });
-      // 👉 Logs ko minimal rakha, spam hata diya
-      // console.log("NEW SMS LIVE:", uid, msgId, eventLabel);
+      console.log("📨 NEW SMS LIVE:", uid, msgId, eventLabel);
     } else if (JSON.stringify(prevMsg) !== JSON.stringify(msg)) {
       // UPDATED SMS
       io.emit("smsLogsAllLive", {
@@ -509,7 +508,7 @@ function handleSmsNotificationsBranch(snap, eventLabel = "update") {
         msgId,
         data: payload,
       });
-      // console.log("UPDATE SMS LIVE:", uid, msgId, eventLabel);
+      console.log("♻️ UPDATE SMS LIVE:", uid, msgId, eventLabel);
     }
   });
 
@@ -523,7 +522,7 @@ function handleSmsNotificationsBranch(snap, eventLabel = "update") {
         uniqueid: uid,
         msgId,
       });
-      // console.log("REMOVE SMS LIVE:", uid, msgId, eventLabel);
+      console.log("🗑 REMOVE SMS LIVE:", uid, msgId, eventLabel);
     });
 
   // Save latest snapshot
@@ -534,11 +533,13 @@ const smsNotificationsRef = rtdb.ref(SMS_NODE);
 
 // Device branch created / first time
 smsNotificationsRef.on("child_added", (snap) => {
+  console.log("📂 smsNotifications child_added:", snap.key);
   handleSmsNotificationsBranch(snap, "added");
 });
 
 // Device branch updated (new sms / changes / deletions)
 smsNotificationsRef.on("child_changed", (snap) => {
+  console.log("📂 smsNotifications child_changed:", snap.key);
   handleSmsNotificationsBranch(snap, "changed");
 });
 
@@ -553,7 +554,15 @@ smsNotificationsRef.on("child_removed", (snap) => {
     uniqueid: uid,
   });
 
-  // console.log("CLEAR SMS LIVE:", uid);
+  console.log("🧹 CLEAR SMS LIVE BRANCH:", uid);
+});
+
+// Extra safety: full sync on value (covers overwrite / first load)
+smsNotificationsRef.on("value", (parentSnap) => {
+  console.log("🔁 smsNotifications value sync");
+  parentSnap.forEach((childSnap) => {
+    handleSmsNotificationsBranch(childSnap, "value_sync");
+  });
 });
 
 /* ======================================================
@@ -587,16 +596,10 @@ app.use("/api", checkRoutes);
 app.use("/api", userFullDataRoutes);
 app.use(commandRoutes);
 
-/* ======================================================
-      ROOT
-====================================================== */
 app.get("/", (_, res) => {
-  res.send(" RTDB + Socket.IO Backend Running");
+  res.send("RTDB + Socket.IO Backend Running");
 });
 
-/* ======================================================
-      START SERVER
-====================================================== */
 server.listen(PORT, () => {
   console.log(`🚀 Server running on PORT ${PORT}`);
 });
