@@ -318,7 +318,7 @@ rtdb
 
 // last FCM send time per UID
 const lastCheckPing = {};
-const CHECK_COOLDOWN = 30 * 1000; // 30 seconds
+const CHECK_COOLDOWN = 5 * 1000; // 30 seconds
 
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
