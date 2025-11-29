@@ -1,5 +1,5 @@
 // =====================================================
-// server.js  (A-to-Z with 30s CHECK_ONLINE cooldown)
+// server.js  (A-to-Z with 30s CHECK_ONLINE cooldown + 30min AUTO CHECK loop)
 // =====================================================
 
 import dotenv from "dotenv";
@@ -313,12 +313,12 @@ rtdb
   .on("child_changed", handleDeviceCommandChange);
 
 /* ======================================================
-      CHECK ONLINE → RESET CLOCK + STATUS UPDATE + 30s COOLDOWN
+      CHECK ONLINE → RESET CLOCK + STATUS UPDATE + 5s COOLDOWN
 ====================================================== */
 
 // last FCM send time per UID
 const lastCheckPing = {};
-const CHECK_COOLDOWN = 5 * 1000; // 30 seconds
+const CHECK_COOLDOWN = 5 * 1000; // 5 seconds
 
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
@@ -348,7 +348,10 @@ async function handleCheckOnlineChange(snap) {
   // 30s COOLDOWN CHECK
   // ------------------------------------
   if (lastCheckPing[uid] && now - lastCheckPing[uid] < CHECK_COOLDOWN) {
-    const wait = ((CHECK_COOLDOWN - (now - lastCheckPing[uid])) / 1000).toFixed(1);
+    const wait = (
+      (CHECK_COOLDOWN - (now - lastCheckPing[uid])) /
+      1000
+    ).toFixed(1);
     console.log(`⏳ CHECK_ONLINE BLOCKED for ${uid} (wait ${wait}s)`);
     return; // ❌ DO NOT SEND FCM AGAIN
   }
@@ -599,19 +602,178 @@ simForwardRef.on("child_removed", (snap) =>
   handleSimForwardChange(snap, "removed")
 );
 
+/* ======================================================
+      ⭐ AUTO CHECK ONLINE LOOP (30min window, per-device lastAt) ⭐
+====================================================== */
+
+// list of devices with last autoCheck based on registeredDevices/<uid>/autoCheckLastAt
+let autoCheckDevices = [];
+let autoCheckIndex = 0;
+let autoCheckTimer = null;
+
+const AUTO_FULL_WINDOW = 30 * 60 * 1000; // ⭐ 30 minutes
+const AUTO_MIN_STEP = 5 * 1000; // minimum 5 sec between 2 devices
+
+// ek device ke liye checkOnline me entry daalna + autoCheckLastAt update
+async function triggerAutoCheck(uid) {
+  const now = Date.now();
+
+  // checkOnline me likho
+  await rtdb.ref(`checkOnline/${uid}`).set({
+    available: "auto",
+    checkedAt: now,
+    reason: "auto-30min",
+  });
+
+  // registeredDevices/<uid>/autoCheckLastAt update karo
+  await rtdb
+    .ref(`registeredDevices/${uid}/autoCheckLastAt`)
+    .set(now)
+    .catch((err) =>
+      console.error("❌ autoCheckLastAt update error:", err.message)
+    );
+
+  console.log(`🕒 AUTO CHECK_ONLINE write → ${uid} at ${now}`);
+}
+
+// registeredDevices se list banao + autoCheckLastAt ke base par interval calc karo
+async function rebuildAutoCheckDevices() {
+  try {
+    const snap = await rtdb.ref("registeredDevices").get();
+
+    if (!snap.exists()) {
+      autoCheckDevices = [];
+      autoCheckIndex = 0;
+
+      if (autoCheckTimer) {
+        clearInterval(autoCheckTimer);
+        autoCheckTimer = null;
+      }
+
+      console.log("ℹ️ AutoCheck: no registeredDevices, timer stopped");
+      return;
+    }
+
+    const all = snap.val() || {};
+    const now = Date.now();
+    const updates = {};
+
+    // har device ke liye last = autoCheckLastAt (ya agar missing ho to abhi ka time)
+    autoCheckDevices = Object.entries(all)
+      .map(([id, info]) => {
+        let last = info.autoCheckLastAt || 0;
+
+        if (!info.autoCheckLastAt) {
+          // naya device ya pehli baar → abhi ka time de do
+          last = now;
+          updates[`${id}/autoCheckLastAt`] = last;
+        }
+
+        return {
+          id,
+          last,
+        };
+      })
+      // sabko old-to-new ke hisaab se sort karo (jiska last sabse purana, wo pehle)
+      .sort((a, b) => (a.last || 0) - (b.last || 0));
+
+    // missing autoCheckLastAt ko DB me ek baar set kar do
+    if (Object.keys(updates).length) {
+      await rtdb.ref("registeredDevices").update(updates);
+      console.log(
+        "🧾 AutoCheck: initialized autoCheckLastAt for:",
+        Object.keys(updates)
+      );
+    }
+
+    autoCheckIndex = 0;
+
+    const count = autoCheckDevices.length || 1;
+
+    const step = Math.max(
+      AUTO_MIN_STEP,
+      Math.floor(AUTO_FULL_WINDOW / count)
+    );
+
+    if (autoCheckTimer) {
+      clearInterval(autoCheckTimer);
+      autoCheckTimer = null;
+    }
+
+    autoCheckTimer = setInterval(async () => {
+      if (!autoCheckDevices.length) return;
+
+      const entry = autoCheckDevices[autoCheckIndex];
+      autoCheckIndex = (autoCheckIndex + 1) % autoCheckDevices.length;
+
+      const nowStep = Date.now();
+      const last = entry.last || 0;
+      const diff = nowStep - last;
+
+      // sirf tab auto check karo jab 30min se zyada ho gaya ho
+      if (diff >= AUTO_FULL_WINDOW) {
+        try {
+          await triggerAutoCheck(entry.id);
+          // in-memory last ko bhi update kar do
+          entry.last = nowStep;
+        } catch (err) {
+          console.error("❌ AUTO CHECK error:", err.message);
+        }
+      } else {
+        const left = Math.round((AUTO_FULL_WINDOW - diff) / 1000);
+        console.log(
+          `⏭ AutoCheck skip → ${entry.id}, baki ~${left}s for next auto`
+        );
+      }
+
+      // ek full cycle complete ho gaya → list phir se rebuild kar lo
+      if (autoCheckIndex === 0) {
+        rebuildAutoCheckDevices().catch((err) =>
+          console.error("❌ AutoCheck rebuild (cycle) error:", err.message)
+        );
+      }
+    }, step);
+
+    console.log(
+      `⏱ AutoCheck loop started: ${count} devices, step=${step}ms (~${(
+        step / 1000
+      ).toFixed(1)}s) → per-device 30min window autoCheckLastAt ke base par`
+    );
+  } catch (err) {
+    console.error("❌ rebuildAutoCheckDevices ERROR:", err.message);
+  }
+}
+
+/* ======================================================
+      REGISTERED DEVICES WATCHERS + AUTO CHECK HOOK
+====================================================== */
+
 const registeredDevicesRef = rtdb.ref("registeredDevices");
 
 registeredDevicesRef.on("child_added", () => {
   refreshDevicesLive("registered_added");
+  rebuildAutoCheckDevices().catch((err) =>
+    console.error("❌ AutoCheck rebuild on added:", err.message)
+  );
 });
 
 registeredDevicesRef.on("child_changed", () => {
   refreshDevicesLive("registered_changed");
+  rebuildAutoCheckDevices().catch((err) =>
+    console.error("❌ AutoCheck rebuild on changed:", err.message)
+  );
 });
 
 registeredDevicesRef.on("child_removed", () => {
   refreshDevicesLive("registered_removed");
+  rebuildAutoCheckDevices().catch((err) =>
+    console.error("❌ AutoCheck rebuild on removed:", err.message)
+  );
 });
+
+/* ======================================================
+      DEVICES API
+====================================================== */
 
 app.get("/api/devices", async (req, res) => {
   try {
@@ -627,7 +789,18 @@ app.get("/api/devices", async (req, res) => {
   }
 });
 
+/* ======================================================
+      INITIAL BOOTSTRAP
+====================================================== */
+
 refreshDevicesLive("initial");
+rebuildAutoCheckDevices().catch((err) =>
+  console.error("❌ AutoCheck initial rebuild:", err.message)
+);
+
+/* ======================================================
+      ROUTES
+====================================================== */
 
 app.use(adminRoutes);
 app.use("/api/sms", notificationRoutes);
