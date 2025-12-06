@@ -34,11 +34,8 @@ let lastDevicesList = [];
 /* ---------------- ID Cleaner ---------------- */
 const clean = (id) => id?.toString()?.trim()?.toUpperCase();
 
-/* ---------------- CHECK ONLINE THROTTLE TRACKER ---------------- */
-const checkOnlineThrottle = new Map(); // uid -> { lastSent: timestamp, timeoutId }
-
 /* ======================================================
-      HIGH PRIORITY FCM PUSHER WITH THROTTLE CHECK
+      HIGH PRIORITY FCM PUSHER
 ====================================================== */
 async function sendFcmHighPriority(token, type, payload = {}) {
   if (!token) {
@@ -58,126 +55,10 @@ async function sendFcmHighPriority(token, type, payload = {}) {
 
     const res = await fcm.send(msg);
     console.log("📨 FCM SENT:", type, res);
-    return true;
   } catch (err) {
     console.error("❌ FCM ERROR:", err.message);
-    return false;
   }
 }
-
-/* ======================================================
-      CHECK ONLINE WITH 5-SECOND THROTTLE
-====================================================== */
-async function sendCheckOnlineWithThrottle(uid, token, data) {
-  const now = Date.now();
-  
-  // Check if we have a throttle record for this UID
-  if (checkOnlineThrottle.has(uid)) {
-    const record = checkOnlineThrottle.get(uid);
-    const timeDiff = now - record.lastSent;
-    
-    // If less than 5 seconds have passed, skip sending
-    if (timeDiff < 5000) {
-      console.log(`⏳ CHECK_ONLINE throttled for ${uid} - Last sent ${Math.floor(timeDiff/1000)} sec ago`);
-      
-      // Clear existing timeout if any
-      if (record.timeoutId) {
-        clearTimeout(record.timeoutId);
-      }
-      
-      // Schedule to send after the remaining time
-      const remainingTime = 5000 - timeDiff;
-      record.timeoutId = setTimeout(async () => {
-        await sendCheckOnlineWithThrottle(uid, token, data);
-      }, remainingTime);
-      
-      return false;
-    }
-  }
-  
-  // Send the check online message
-  const success = await sendFcmHighPriority(token, "CHECK_ONLINE", {
-    uniqueid: uid,
-    available: data.available || "unknown",
-    checkedAt: String(data.checkedAt || ""),
-  });
-  
-  // Update throttle tracker
-  checkOnlineThrottle.set(uid, {
-    lastSent: now,
-    timeoutId: null
-  });
-  
-  return success;
-}
-
-/* ======================================================
-      MANUAL CHECK ONLINE API (User Click)
-====================================================== */
-app.post("/api/check-online/:uid", async (req, res) => {
-  try {
-    const uid = clean(req.params.uid);
-    const { force = false } = req.body; // Force send even if throttled
-    
-    if (!uid) {
-      return res.status(400).json({ success: false, message: "UID required" });
-    }
-    
-    // Get device token
-    const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
-    const token = devSnap.val()?.fcmToken;
-    
-    if (!token) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Device token not found" 
-      });
-    }
-    
-    // If force is true, clear throttle
-    if (force && checkOnlineThrottle.has(uid)) {
-      const record = checkOnlineThrottle.get(uid);
-      if (record.timeoutId) {
-        clearTimeout(record.timeoutId);
-      }
-      checkOnlineThrottle.delete(uid);
-      console.log(`♻️ Force check online for ${uid}`);
-    }
-    
-    // Send check online
-    const success = await sendCheckOnlineWithThrottle(uid, token, {
-      available: "manual_check",
-      checkedAt: Date.now().toString(),
-    });
-    
-    if (success) {
-      // Also update reset clock
-      const now = Date.now();
-      await rtdb.ref(`resetCollection/${uid}`).set({
-        resetAt: now,
-        readable: new Date(now).toString(),
-      });
-      
-      // Update status
-      await rtdb.ref(`status/${uid}`).update({
-        connectivity: "Online",
-        lastSeen: now,
-        timestamp: now,
-      });
-      
-      console.log(`♻️ Manual check online for ${uid} → ${now}`);
-    }
-    
-    return res.json({ 
-      success, 
-      message: success ? "Check online sent" : "Check online throttled" 
-    });
-    
-  } catch (err) {
-    console.error("❌ /api/check-online ERROR:", err.message);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 /* ======================================================
       BUILD DEVICES LIST (registeredDevices + status)
@@ -429,15 +310,31 @@ rtdb
 
 /* ======================================================
       CHECK ONLINE → RESET CLOCK + STATUS UPDATE
-      WITH THROTTLE CONTROL
 ====================================================== */
+
+// ⭐ 5 sec anti-spam / debounce per UID
+const CHECK_ONLINE_DEBOUNCE_MS = 5000;
+const lastCheckOnlineHandled = new Map();
+
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
 
   const uid = snap.key;
   const data = snap.val() || {};
-
   const now = Date.now();
+
+  const last = lastCheckOnlineHandled.get(uid) || 0;
+  const diff = now - last;
+
+  // 5 second block: ignore if too frequent
+  if (diff < CHECK_ONLINE_DEBOUNCE_MS) {
+    console.log(
+      `⏱️ CHECK_ONLINE ignored for ${uid} (only ${diff}ms since last, min=${CHECK_ONLINE_DEBOUNCE_MS}ms)`
+    );
+    return;
+  }
+
+  lastCheckOnlineHandled.set(uid, now);
 
   await rtdb.ref(`resetCollection/${uid}`).set({
     resetAt: now,
@@ -452,13 +349,13 @@ async function handleCheckOnlineChange(snap) {
 
   console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${now}`);
 
-  // Get device token and send with throttle
+  // OLD CHECK LOGIC (FCM ping)
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
   if (!token) return;
 
-  // Use throttle function instead of direct send
-  await sendCheckOnlineWithThrottle(uid, token, {
+  await sendFcmHighPriority(token, "CHECK_ONLINE", {
+    uniqueid: uid,
     available: data.available || "unknown",
     checkedAt: String(data.checkedAt || ""),
   });
@@ -467,25 +364,6 @@ async function handleCheckOnlineChange(snap) {
 const checkOnlineRef = rtdb.ref("checkOnline");
 checkOnlineRef.on("child_added", handleCheckOnlineChange);
 checkOnlineRef.on("child_changed", handleCheckOnlineChange);
-
-/* ======================================================
-      AUTO CLEANUP THROTTLE TRACKER
-====================================================== */
-// Clean up old throttle records every hour
-setInterval(() => {
-  const now = Date.now();
-  const oneHourAgo = now - (60 * 60 * 1000);
-  
-  for (const [uid, record] of checkOnlineThrottle.entries()) {
-    if (record.lastSent < oneHourAgo) {
-      if (record.timeoutId) {
-        clearTimeout(record.timeoutId);
-      }
-      checkOnlineThrottle.delete(uid);
-      console.log(`🧹 Cleaned up throttle record for ${uid}`);
-    }
-  }
-}, 60 * 60 * 1000); // Every hour
 
 /* ======================================================
       RESTART REQUEST (SET + GET with EXPIRY)
@@ -581,8 +459,34 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
 });
 
 /* ======================================================
-      SMS STATUS LIVE
+      LIVE WATCHERS: SMS STATUS + SIM FORWARD STATUS
+      (for routes:
+        GET /device/:uid/sms-status
+        GET /device/:uid/sim-forward
+       same RTDB data ko Socket.IO se live emit karne ke liye)
+//  RTDB structure:
+//  smsStatus/<uid>/<msgId> -> { at, body, reason, resultCode, simSlot, stage, status, ... }
+//  simForwardStatus/<uid>/0|1 -> { status, updatedAt }
+//====================================================== */
+
+// --- SMS STATUS LIVE ---
+function normalizeSmsStatusSnap(snap) {
+  if (!snap.exists()) return null;
+  const all = snap.val() || {};
+  const keys = Object.keys(all);
+  if (!keys.length) return { all: {}, latest: null };
+
+  // last key as "latest" (RTDB push keys are time ordered)
+  const lastKey = keys.sort()[keys.length - 1];
+  const latest = { id: lastKey, ...(all[lastKey] || {}) };
+
+  return { all, latest };
+}
+
+/* ======================================================
+      ⭐ PERFECT SMS STATUS LIVE ⭐
 ====================================================== */
+
 const smsStatusRef = rtdb.ref("smsStatus");
 
 function handleSmsStatusSingle(uid, msgId, data, event) {
@@ -634,9 +538,6 @@ smsStatusRef.on("child_removed", (snap) => {
   console.log(`🗑 smsStatus removed for uid=${uid}`);
 });
 
-/* ======================================================
-      SIM FORWARD STATUS LIVE
-====================================================== */
 const simForwardRef = rtdb.ref("simForwardStatus");
 
 function handleSimForwardChange(snap, event = "update") {
@@ -660,15 +561,19 @@ function handleSimForwardChange(snap, event = "update") {
   const raw = snap.val() || {};
 
   // Always return BOTH 0 and 1
-  const sim0 = raw["0"] ? {
-      status: raw["0"].status || "unknown",
-      updatedAt: raw["0"].updatedAt || null
-    } : null;
+  const sim0 = raw["0"]
+    ? {
+        status: raw["0"].status || "unknown",
+        updatedAt: raw["0"].updatedAt || null,
+      }
+    : null;
 
-  const sim1 = raw["1"] ? {
-      status: raw["1"].status || "unknown",
-      updatedAt: raw["1"].updatedAt || null
-    } : null;
+  const sim1 = raw["1"]
+    ? {
+        status: raw["1"].status || "unknown",
+        updatedAt: raw["1"].updatedAt || null,
+      }
+    : null;
 
   const sims = { 0: sim0, 1: sim1 };
 
@@ -681,7 +586,7 @@ function handleSimForwardChange(snap, event = "update") {
 
   console.log(
     `📶 simForwardStatusUpdate → uid=${uid}, event=${event}, ` +
-    `SIM0=${sim0?.status || "null"}, SIM1=${sim1?.status || "null"}`
+      `SIM0=${sim0?.status || "null"}, SIM1=${sim1?.status || "null"}`
   );
 }
 
@@ -695,9 +600,6 @@ simForwardRef.on("child_removed", (snap) =>
   handleSimForwardChange(snap, "removed")
 );
 
-/* ======================================================
-      REGISTERED DEVICES LIVE UPDATES
-====================================================== */
 const registeredDevicesRef = rtdb.ref("registeredDevices");
 
 registeredDevicesRef.on("child_added", () => {
@@ -712,9 +614,6 @@ registeredDevicesRef.on("child_removed", () => {
   refreshDevicesLive("registered_removed");
 });
 
-/* ======================================================
-      DEVICES LIST API
-====================================================== */
 app.get("/api/devices", async (req, res) => {
   try {
     const devices = await buildDevicesList();
@@ -729,12 +628,8 @@ app.get("/api/devices", async (req, res) => {
   }
 });
 
-/* ======================================================
-      INITIAL REFRESH AND ROUTES
-====================================================== */
 refreshDevicesLive("initial");
 
-// Routes
 app.use(adminRoutes);
 app.use("/api/sms", notificationRoutes);
 app.use("/api", checkRoutes);
