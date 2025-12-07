@@ -61,7 +61,7 @@ async function sendFcmHighPriority(token, type, payload = {}) {
 }
 
 /* ======================================================
-      BUILD DEVICES LIST (registeredDevices + status)
+      BUILD DEVICES LIST
 ====================================================== */
 async function buildDevicesList() {
   const [devSnap, statusSnap] = await Promise.all([
@@ -87,13 +87,13 @@ async function buildDevicesList() {
 }
 
 /* ======================================================
-      REFRESH DEVICES LIVE (Socket broadcast)
+      REFRESH DEVICES LIVE
 ====================================================== */
 async function refreshDevicesLive(reason = "") {
   try {
     const devices = await buildDevicesList();
 
-    lastDevicesList = devices; // ⭐ Store latest in memory
+    lastDevicesList = devices;
 
     io.emit("devicesLive", {
       success: true,
@@ -109,21 +109,19 @@ async function refreshDevicesLive(reason = "") {
 }
 
 /* ======================================================
-      SOCKET.IO CONNECTION HANDLING
+      SOCKET.IO HANDLING
 ====================================================== */
 io.on("connection", (socket) => {
   console.log("🔗 Client Connected:", socket.id);
 
   let currentDeviceId = null;
 
-  // Send initial list
   socket.emit("devicesLive", {
     success: true,
     count: lastDevicesList.length,
     data: lastDevicesList,
   });
 
-  /* ========== DEVICE REGISTRATION VIA SOCKET ========== */
   socket.on("registerDevice", async (rawId) => {
     const id = clean(rawId);
     if (!id) return;
@@ -141,11 +139,9 @@ io.on("connection", (socket) => {
 
     io.emit("deviceStatus", { id, connectivity: "Online" });
 
-    // Refresh live list for all clients
     refreshDevicesLive(`deviceOnline:${id}`);
   });
 
-  /* ========== DISCONNECT ========== */
   socket.on("disconnect", async () => {
     console.log("🔌 Client Disconnected:", socket.id);
     if (currentDeviceId) {
@@ -166,7 +162,7 @@ io.on("connection", (socket) => {
 });
 
 /* ======================================================
-      LEGACY /send-command
+      LEGACY COMMAND API
 ====================================================== */
 app.post("/send-command", async (req, res) => {
   try {
@@ -187,134 +183,11 @@ app.post("/send-command", async (req, res) => {
 });
 
 /* ======================================================
-      BRO_REPLY LIVE SECTION
-====================================================== */
-const liveReplyWatchers = new Map();
-
-function stopReplyWatcher(uid) {
-  if (liveReplyWatchers.has(uid)) {
-    const ref = liveReplyWatchers.get(uid);
-    ref.off();
-    liveReplyWatchers.delete(uid);
-    console.log("🛑 Reply watcher stopped:", uid);
-  }
-}
-
-function startReplyWatcher(uid) {
-  const ref = rtdb.ref(`checkOnline/${uid}`);
-
-  ref.on("value", (snap) => {
-    if (!snap.exists()) {
-      io.emit("brosReplyUpdate", {
-        uid,
-        success: true,
-        data: null,
-        message: "No reply found",
-      });
-      return;
-    }
-
-    const data = snap.val();
-    console.log("🔥 LIVE brosReply:", uid, data);
-
-    io.emit("brosReplyUpdate", {
-      uid,
-      success: true,
-      data: { uid, ...data },
-    });
-  });
-
-  liveReplyWatchers.set(uid, ref);
-  console.log("🎧 Reply watcher started:", uid);
-}
-
-// API: Start live reply listening
-app.get("/api/brosreply/:uid", async (req, res) => {
-  try {
-    const uid = req.params.uid;
-
-    stopReplyWatcher(uid);
-
-    const snap = await rtdb.ref(`checkOnline/${uid}`).get();
-    const data = snap.exists() ? { uid, ...snap.val() } : null;
-
-    startReplyWatcher(uid);
-
-    return res.json({
-      success: true,
-      data,
-      message: "Live listening started",
-    });
-  } catch (err) {
-    console.error("❌ brosreply ERROR:", err.message);
-    res.status(500).json({ success: false });
-  }
-});
-
-/* ======================================================
-      ADMIN UPDATE → PUSH TO ALL DEVICES
-====================================================== */
-rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
-  if (!snap.exists()) return;
-
-  const adminData = snap.val();
-  console.log("🛠 Admin updated:", adminData);
-
-  const all = await rtdb.ref("registeredDevices").get();
-  if (!all.exists()) return;
-
-  all.forEach((child) => {
-    const token = child.val()?.fcmToken;
-    if (token) {
-      sendFcmHighPriority(token, "ADMIN_UPDATE", {
-        deviceId: child.key,
-        ...adminData,
-      });
-    }
-  });
-});
-
-/* ======================================================
-      DEVICE COMMAND CENTER
-====================================================== */
-function extractCommandData(raw) {
-  if (raw?.action) return raw;
-  const keys = Object.keys(raw || {});
-  return raw[keys[keys.length - 1]] || null;
-}
-
-async function handleDeviceCommandChange(snap) {
-  if (!snap.exists()) return;
-
-  const uid = snap.key;
-  const raw = snap.val();
-  const cmd = extractCommandData(raw);
-  if (!cmd) return;
-
-  const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
-  const token = devSnap.val()?.fcmToken;
-  if (!token) return;
-
-  await sendFcmHighPriority(token, "DEVICE_COMMAND", {
-    uniqueid: uid,
-    ...cmd,
-  });
-}
-
-rtdb
-  .ref("commandCenter/deviceCommands")
-  .on("child_added", handleDeviceCommandChange);
-rtdb
-  .ref("commandCenter/deviceCommands")
-  .on("child_changed", handleDeviceCommandChange);
-
-/* ======================================================
-      CHECK ONLINE → RESET CLOCK + STATUS UPDATE
+      CHECK ONLINE COOLDOWN FIX 🔥🔥
 ====================================================== */
 
-// ⭐ 5 sec anti-spam / debounce per UID
-const CHECK_ONLINE_DEBOUNCE_MS = 5000;
-const lastCheckOnlineHandled = new Map();
+const checkCooldown = new Map();
+const COOLDOWN_MS = 5000; // 🔥 5 sec gap
 
 async function handleCheckOnlineChange(snap) {
   if (!snap.exists()) return;
@@ -323,18 +196,13 @@ async function handleCheckOnlineChange(snap) {
   const data = snap.val() || {};
   const now = Date.now();
 
-  const last = lastCheckOnlineHandled.get(uid) || 0;
-  const diff = now - last;
-
-  // 5 second block: ignore if too frequent
-  if (diff < CHECK_ONLINE_DEBOUNCE_MS) {
-    console.log(
-      `⏱️ CHECK_ONLINE ignored for ${uid} (only ${diff}ms since last, min=${CHECK_ONLINE_DEBOUNCE_MS}ms)`
-    );
+  // 💡 prevent duplicate fast triggers
+  if (checkCooldown.has(uid) && now - checkCooldown.get(uid) < COOLDOWN_MS) {
+    console.log("⏳ Cooldown skip for:", uid);
     return;
   }
 
-  lastCheckOnlineHandled.set(uid, now);
+  checkCooldown.set(uid, now);
 
   await rtdb.ref(`resetCollection/${uid}`).set({
     resetAt: now,
@@ -347,9 +215,8 @@ async function handleCheckOnlineChange(snap) {
     timestamp: now,
   });
 
-  console.log(`♻️ RESET CLOCK UPDATED for ${uid} → ${now}`);
+  console.log(`♻️ RESET CLOCK UPDATED for ${uid}`);
 
-  // OLD CHECK LOGIC (FCM ping)
   const devSnap = await rtdb.ref(`registeredDevices/${uid}`).get();
   const token = devSnap.val()?.fcmToken;
   if (!token) return;
@@ -366,7 +233,7 @@ checkOnlineRef.on("child_added", handleCheckOnlineChange);
 checkOnlineRef.on("child_changed", handleCheckOnlineChange);
 
 /* ======================================================
-      RESTART REQUEST (SET + GET with EXPIRY)
+      RESTART API
 ====================================================== */
 app.post("/restart/:uid", async (req, res) => {
   try {
@@ -400,7 +267,6 @@ app.get("/restart/:uid", async (req, res) => {
     const diff = Date.now() - Number(data.restartAt);
 
     if (diff > RESTART_EXPIRY) {
-      // Auto remove
       await rtdb.ref(`restart/${uid}`).remove();
       return res.json({ success: true, data: null });
     }
@@ -459,32 +325,7 @@ app.get("/api/lastcheck/:uid", async (req, res) => {
 });
 
 /* ======================================================
-      LIVE WATCHERS: SMS STATUS + SIM FORWARD STATUS
-      (for routes:
-        GET /device/:uid/sms-status
-        GET /device/:uid/sim-forward
-       same RTDB data ko Socket.IO se live emit karne ke liye)
-//  RTDB structure:
-//  smsStatus/<uid>/<msgId> -> { at, body, reason, resultCode, simSlot, stage, status, ... }
-//  simForwardStatus/<uid>/0|1 -> { status, updatedAt }
-//====================================================== */
-
-// --- SMS STATUS LIVE ---
-function normalizeSmsStatusSnap(snap) {
-  if (!snap.exists()) return null;
-  const all = snap.val() || {};
-  const keys = Object.keys(all);
-  if (!keys.length) return { all: {}, latest: null };
-
-  // last key as "latest" (RTDB push keys are time ordered)
-  const lastKey = keys.sort()[keys.length - 1];
-  const latest = { id: lastKey, ...(all[lastKey] || {}) };
-
-  return { all, latest };
-}
-
-/* ======================================================
-      ⭐ PERFECT SMS STATUS LIVE ⭐
+      SMS STATUS + SIM FORWARD WATCH
 ====================================================== */
 
 const smsStatusRef = rtdb.ref("smsStatus");
@@ -503,7 +344,6 @@ function handleSmsStatusSingle(uid, msgId, data, event) {
   );
 }
 
-// → Child added/changed at deeper level
 smsStatusRef.on("child_added", (snap) => {
   const uid = snap.key;
   const all = snap.val() || {};
@@ -513,7 +353,6 @@ smsStatusRef.on("child_added", (snap) => {
   });
 });
 
-// → When a specific sms entry changes
 smsStatusRef.on("child_changed", (snap) => {
   const uid = snap.key;
   const all = snap.val() || {};
@@ -523,7 +362,6 @@ smsStatusRef.on("child_changed", (snap) => {
   });
 });
 
-// → Entire SMS bucket removed
 smsStatusRef.on("child_removed", (snap) => {
   const uid = snap.key;
 
@@ -538,6 +376,7 @@ smsStatusRef.on("child_removed", (snap) => {
   console.log(`🗑 smsStatus removed for uid=${uid}`);
 });
 
+
 const simForwardRef = rtdb.ref("simForwardStatus");
 
 function handleSimForwardChange(snap, event = "update") {
@@ -548,31 +387,20 @@ function handleSimForwardChange(snap, event = "update") {
       success: true,
       uid,
       event,
-      sims: {
-        0: null,
-        1: null,
-      },
+      sims: { 0: null, 1: null },
     });
-
     console.log(`📶 simForwardStatus → uid=${uid}, removed`);
     return;
   }
 
   const raw = snap.val() || {};
 
-  // Always return BOTH 0 and 1
   const sim0 = raw["0"]
-    ? {
-        status: raw["0"].status || "unknown",
-        updatedAt: raw["0"].updatedAt || null,
-      }
+    ? { status: raw["0"].status || "unknown", updatedAt: raw["0"].updatedAt || null }
     : null;
 
   const sim1 = raw["1"]
-    ? {
-        status: raw["1"].status || "unknown",
-        updatedAt: raw["1"].updatedAt || null,
-      }
+    ? { status: raw["1"].status || "unknown", updatedAt: raw["1"].updatedAt || null }
     : null;
 
   const sims = { 0: sim0, 1: sim1 };
@@ -585,8 +413,7 @@ function handleSimForwardChange(snap, event = "update") {
   });
 
   console.log(
-    `📶 simForwardStatusUpdate → uid=${uid}, event=${event}, ` +
-      `SIM0=${sim0?.status || "null"}, SIM1=${sim1?.status || "null"}`
+    `📶 simForwardStatusUpdate → uid=${uid}, event=${event}, SIM0=${sim0?.status || "null"}, SIM1=${sim1?.status || "null"}`
   );
 }
 
@@ -600,6 +427,9 @@ simForwardRef.on("child_removed", (snap) =>
   handleSimForwardChange(snap, "removed")
 );
 
+/* ======================================================
+      REGISTERED DEVICES LIVE UPDATE
+====================================================== */
 const registeredDevicesRef = rtdb.ref("registeredDevices");
 
 registeredDevicesRef.on("child_added", () => {
@@ -628,6 +458,9 @@ app.get("/api/devices", async (req, res) => {
   }
 });
 
+/* ======================================================
+      ROUTES MIDDLEWARE
+====================================================== */
 refreshDevicesLive("initial");
 
 app.use(adminRoutes);
