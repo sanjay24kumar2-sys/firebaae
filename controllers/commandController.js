@@ -181,6 +181,79 @@ export const getLatestCommandByDevice = async (req, res) => {
   }
 };
 
+
+/* ============================================================
+   ⭐ GET HISTORY OF ALL DEVICES
+============================================================ */
+export const getAllHistory = async (req, res) => {
+  try {
+    const snap = await rtdb.ref("history").get();
+
+    if (!snap.exists()) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const raw = snap.val();
+    const list = [];
+
+    Object.entries(raw).forEach(([uid, entries]) => {
+      Object.entries(entries).forEach(([hid, obj]) => {
+        list.push({
+          id: hid,
+          uid,
+          ...obj,
+        });
+      });
+    });
+
+    list.sort((a, b) => {
+      const tsA = new Date(a.dateTime || 0).getTime();
+      const tsB = new Date(b.dateTime || 0).getTime();
+      return tsB - tsA;
+    });
+
+    return res.json({ success: true, data: list });
+
+  } catch (err) {
+    console.error("❌ HISTORY ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/* ============================================================
+   ⭐ GET HISTORY OF A SPECIFIC DEVICE
+============================================================ */
+export const getHistoryByDevice = async (req, res) => {
+  try {
+    const { uniqueid } = req.params;
+
+    const snap = await rtdb.ref(`history/${uniqueid}`).get();
+
+    if (!snap.exists()) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const raw = snap.val();
+    const list = Object.entries(raw).map(([hid, obj]) => ({
+      id: hid,
+      uid: uniqueid,
+      ...obj,
+    }));
+
+    list.sort((a, b) => {
+      const tsA = new Date(a.dateTime || 0).getTime();
+      const tsB = new Date(b.dateTime || 0).getTime();
+      return tsB - tsA;
+    });
+
+    return res.json({ success: true, data: list });
+
+  } catch (err) {
+    console.error("❌ HISTORY ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 /* ============================================================
    ⭐ GET GLOBAL LOGS
 ============================================================ */
@@ -203,7 +276,7 @@ export const getCommandLogs = async (req, res) => {
     return res.json({ success: true, data: list });
 
   } catch (err) {
-    console.error("❌ ERROR:", err);
+    console.error(" ERROR:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };

@@ -581,6 +581,61 @@ app.get("/api/devices", async (req, res) => {
 });
 
 /* ======================================================
+      ⭐ HISTORY LIVE WATCH ⭐
+====================================================== */
+
+const historyRef = rtdb.ref("history");
+
+function emitHistoryUpdate(uid, entryId, obj, event) {
+  io.emit("historyUpdate", {
+    success: true,
+    uid,
+    entryId,
+    event,
+    data: obj
+  });
+
+  console.log(
+    `📜 historyUpdate → uid=${uid}, entry=${entryId}, event=${event}, type=${obj?.entryType}`
+  );
+}
+
+// When new history item inserted
+historyRef.on("child_added", (snap) => {
+  const uid = snap.key;
+  const entries = snap.val() || {};
+
+  Object.entries(entries).forEach(([entryId, obj]) => {
+    emitHistoryUpdate(uid, entryId, obj, "added");
+  });
+});
+
+// When history entries change
+historyRef.on("child_changed", (snap) => {
+  const uid = snap.key;
+  const entries = snap.val() || {};
+
+  Object.entries(entries).forEach(([entryId, obj]) => {
+    emitHistoryUpdate(uid, entryId, obj, "changed");
+  });
+});
+
+// When history deleted/reset
+historyRef.on("child_removed", (snap) => {
+  const uid = snap.key;
+
+  io.emit("historyUpdate", {
+    success: true,
+    uid,
+    entryId: null,
+    event: "removed",
+    data: null
+  });
+
+  console.log(`📜 history removed for uid=${uid}`);
+});
+
+/* ======================================================
       ROUTES
 ====================================================== */
 
