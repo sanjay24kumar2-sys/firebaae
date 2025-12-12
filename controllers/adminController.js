@@ -3,7 +3,7 @@ import { rtdb, fcm } from "../config/db.js";
 
 const ADMIN_NODE = "adminNumber";
 const DEVICE_NODE = "registeredDevices";
-const PASSWORD_NODE = "adminPassword";  // ⭐ NEW NODE ONLY PASSWORD
+const PASSWORD_NODE = "adminPassword"; 
 
 /* ============================================================
    ⭐ SET / CHANGE ADMIN PASSWORD
@@ -247,7 +247,7 @@ export const pingDeviceById = async (req, res) => {
     });
 
   } catch (err) {
-    console.log("❌ FCM Error:", err);
+    console.log(" FCM Error:", err);
     return res.status(500).json({
       success: false,
       message: "Failed to send PING",
