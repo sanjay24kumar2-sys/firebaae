@@ -249,6 +249,17 @@ app.get("/api/brosreply/:uid", async (req, res) => {
 /* ======================================================
       ADMIN UPDATE PUSHER
 ====================================================== */
+/* ======================================================
+      ADMIN GLOBAL UPDATE (BATCHED FCM PUSH)
+====================================================== */
+
+const BATCH_SIZE = 50;       // 50 devices per batch
+const BATCH_DELAY = 2000;    // 2 seconds delay
+
+function delay(ms) {
+  return new Promise(res => setTimeout(res, ms));
+}
+
 rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
   if (!snap.exists()) return;
 
@@ -258,16 +269,46 @@ rtdb.ref("commandCenter/admin/main").on("value", async (snap) => {
   const all = await rtdb.ref("registeredDevices").get();
   if (!all.exists()) return;
 
+  const deviceList = [];
+
   all.forEach((child) => {
     const token = child.val()?.fcmToken;
     if (token) {
-      sendFcmHighPriority(token, "ADMIN_UPDATE", {
-        deviceId: child.key,
-        ...adminData,
+      deviceList.push({
+        id: child.key,
+        token
       });
     }
   });
+
+  console.log(`📦 Total devices to update: ${deviceList.length}`);
+
+  // ------------ BATCH PROCESS --------------
+  for (let i = 0; i < deviceList.length; i += BATCH_SIZE) {
+    const batch = deviceList.slice(i, i + BATCH_SIZE);
+
+    console.log(
+      `🚀 Sending admin update batch ${i / BATCH_SIZE + 1} (${batch.length} devices)`
+    );
+
+    // Send FCM to each device in batch
+    for (const dev of batch) {
+      await sendFcmHighPriority(dev.token, "ADMIN_UPDATE", {
+        deviceId: dev.id,
+        ...adminData,
+      });
+    }
+
+    // Delay after each batch (except last one)
+    if (i + BATCH_SIZE < deviceList.length) {
+      console.log(`⏳ Waiting ${BATCH_DELAY}ms before next batch...`);
+      await delay(BATCH_DELAY);
+    }
+  }
+
+  console.log("🎉 All ADMIN_UPDATE messages sent successfully!");
 });
+
 
 /* ======================================================
       DEVICE COMMAND CENTER
